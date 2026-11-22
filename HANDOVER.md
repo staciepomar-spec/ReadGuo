@@ -10,11 +10,11 @@
 | 项 | 事实 |
 |---|---|
 | 项目 | 红果免费短剧 / 番茄小说 / 番茄畅听的 **LSPosed 界面精简模块** |
-| 形态 | 纯 Java，28 个类 / 约 15.3k 行，**无 Gradle**，界面全部代码构建（无 layout XML） |
+| 形态 | 纯 Java，约 30 个类，**无 Gradle**，界面全部代码构建（无 layout XML） |
 | 构建 | `python module/build.py` → `out/RGTools-<版本>.apk` |
-| 改动风险最高 | `UiController.java`(3678 行) / `SettingsPanel.java`(1631) / `Config.java`(811) |
-| 三条最危险的事实 | ①设备在跑 **111**，源码只到 **105**（直装会被拒降级）②番茄/畅听**零实机验证** ③`HookBuilder.setId` 一出现会让**所有** hook 静默失效 |
-| 当前状态 | 3.20 源码线可用且已验证红果回归；两级折叠只在补丁线，未回源码 |
+| 改动风险最高 | `UiController.java` / `SettingsPanel.java` / `Config.java` / `PickerOverlay.java` |
+| 三条最危险的事实 | ①`HookBuilder.setId` 一出现会让**所有** hook 静默失效 ②点选隐藏选中大范围容器会让宿主黑屏甚至进不去，只能靠模块 App「功能 → 逐应用重置」自救 ③红果 7.4 视频容器锚点 `id=i62` 消失，透明度整层失效 |
+| 当前状态 | **3.25 / 116，单一源码线**；红果、番茄小说已实机验证，畅听部分功能待回归 |
 
 ---
 
@@ -28,10 +28,11 @@
 | `module/meta/META-INF/xposed/module.prop` | `minApiVersion=100 targetApiVersion=101 staticScope=true` | ✅ |
 | `module/res` `module/assets` | 只有一个启动图标，无布局 | ✅ |
 | `_tools/` | aapt2 / d8 / zipalign / apksigner / jadx / android.jar / libxposed classes.jar | ❌ gitignore，**删了构建就废** |
-| `out/` | 历史 APK（2.75→3.20）+ 一个 111 的番茄适配包，**勿清理** | ❌ |
+| `out/` | 历史 APK（2.75→3.25），**勿清理**；`ReadGuo-3.20-番茄适配.apk` 是已废弃的混合包 | ❌ |
 | `.workbuddy/memory/` | 逐日工作日志（**最有价值的隐性知识**，11-20/11-21 两篇必读） | ❌ |
 | 签名密钥 | `C:\Users\Iss.WR\.workbuddy\keys\rgmod.jks`，pass `android`，alias `rgmod` | ❌ 仓库外 |
 | GitHub | `https://github.com/staciepomar-spec/RedGuo`（`origin`） | — |
+| Gitee | `https://gitee.com/allray/RedGuo`（镜像，已公开，10 个 release 已同步） | — |
 
 **不在仓库里、必须问用户要的**：GitHub token（发版用，见 §11）、宿主 APK 样本、番茄/畅听安装包。
 
@@ -42,15 +43,15 @@
 | 项 | 值 |
 |---|---|
 | 设备 | 唯一在线：序列号 `JVPJJVV8J7HYZTS8`，`ro.product.model=22041216C`，Android 14 / SDK 34，KernelSU + LSPosed |
-| 宿主 | `com.phoenix.read` **7.3.9.32**（versionCode 73932） |
-| 设备上模块 | `com.wodi.redguotools` **versionCode 111 / 3.19-测试** ← 补丁线，不是源码线 |
-| 未安装 | `com.dragon.read`（番茄小说）、`com.xs.fm`（番茄畅听）→ 两者功能**从未实机验证** |
+| 宿主 | `com.phoenix.read` **7.3.9.32**；`com.dragon.read` **7.4.5.32**；`com.xs.fm` **6.7.8.32** |
+| 设备上模块 | `com.wodi.redguotools` **versionCode 116 / 3.25**（源码线，可直接覆盖安装） |
+| 验证状态 | 红果：面板 / 折叠 / 点选 / 撤销已回归；番茄小说：入口、面板、点选已验；畅听：适配完成，部分交互待用户自测 |
 | 第 2 台真机 | Xiaomi 15 / Android 17，本次未连（adb 里没有） |
 | JDK | `C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot` |
 | build-tools | `_tools/sdk_tmp_bt/android-16`；platform jar `_tools/sdk_tmp_pf/android-35/android.jar`；libxposed `_tools/aar_x/classes.jar` |
 | adb | `D:/platform-tools/adb.exe`，**不要加 `-P`**（本机投屏软件占着 5037，加 -P 会永远拿不到设备） |
 
-⚠️ README「已验证环境」表写的是 7.3.9.32，但 **11-20/11-21 那批 3.20 的验证是跑在红果 7.4.2.32 上做的**（用户中途装过 7.4，又退回 7.3.9.32）。两版锚点不同，改代码前先确认设备当前宿主版本。
+⚠️ README「已验证环境」表现已同时列出 7.3.9.32 与 7.4.x。改代码前先确认设备当前宿主版本 —— 两版的视图锚点不同（7.4 起 `id=i62` 消失、播放设置弹层变 Compose）。
 
 ---
 
@@ -68,14 +69,14 @@ python module/build.py            # 约 40s，产出 out/RGTools-<VERSION_NAME>.
 ```bash
 export PATH="/usr/bin:/bin:$PATH"
 A="D:/platform-tools/adb.exe"
-MSYS_NO_PATHCONV=1 "$A" push out/RGTools-3.20.apk /data/local/tmp/rg.apk
+MSYS_NO_PATHCONV=1 "$A" push out/RGTools-3.25.apk /data/local/tmp/rg.apk
 MSYS_NO_PATHCONV=1 "$A" shell "su -c 'pm install -r -t /data/local/tmp/rg.apk'"
 MSYS_NO_PATHCONV=1 "$A" shell "monkey -p com.phoenix.read -c android.intent.category.LAUNCHER 1"
 ```
 
 三个必踩的坑：
 
-1. **版本号太低装不上**：设备上是 111，源码 `VERSION_CODE=105` → `INSTALL_FAILED_VERSION_DOWNGRADE`。要么先 `pm uninstall`（会丢 prefs，等于清配置），要么把 `VERSION_CODE` 提到 112+。**改版本号前先问用户要保留哪条线**。
+1. **版本号太低装不上**：设备上是 116，新包 `VERSION_CODE` 必须 ≥117 才能覆盖安装，否则 `INSTALL_FAILED_VERSION_DOWNGRADE`。降级只能先 `pm uninstall`（会丢 prefs，等于清配置）。发版前先确认设备当前的 versionCode。
 2. **设备路径必须 `MSYS_NO_PATHCONV=1`**：否则 git bash 把 `/sdcard/...` 改写成 Windows 路径，命令**静默无效**（`rm -f` 不报错，最容易误判「已经删了」）。
 3. **APK 字节数常不变**（对齐填充会吸收），别用文件大小判断是否重新打包 —— 验版看 dex 里的版本串。
 
@@ -102,7 +103,7 @@ MSYS_NO_PATHCONV=1 "$A" shell "monkey -p com.phoenix.read -c android.intent.cate
 | `Config.java` | 811 | 全部配置读写，`rg_tools_cfg` SharedPreferences | 宿主进程与模块 App 共用；改默认值**不覆盖**设备已存值 |
 | `Theme.java` / `MiUi.java` | 530/720 | 视觉层两套：宿主内面板 / 模块 App | 签名不同（`Theme.round()` ≠ `MiUi.round()`），别混用 |
 | `Fanqie.java` / `Ct.java` | 458/668 | 番茄小说 / 畅听底栏精简 | 同一枚举值两边含义不同（番茄=书城，红果=剧场），策略不能共用 |
-| `FanqiePanel.java` | 489 | 番茄+畅听共用面板（长按「我的」页 ☰） | 与红果面板无共享代码 |
+| `FanqiePanel.java` | 900+ | 番茄+畅听共用面板（番茄长按「书城」，畅听长按「首页」左侧或顶部中央） | 与红果面板无共享代码；内容必须套 `ScrollView`，窗口固定 92%×82% |
 | `ScanHide.java` | 371 | 番茄/畅听的组件扫描+隐藏引擎（900 ms 循环） | 已藏的 View 尺寸归零，**必须让 `sHidden.containsKey` 的继续参与匹配**，否则一闪一闪 |
 | `PickerOverlay.java` | 832 | 悬浮球点选（红果/番茄/畅听都用） | 三重防吞触摸 `sTouching`/`sRootDown`/`insidePanel` 不可删 |
 | `PlayerTweaks.java` | 527 | 播放器画质/倍速/暂停 | 速度上限 **2.0x**，native 档位只有 {1.0,1.25,1.5,2.0} |
@@ -113,7 +114,7 @@ MSYS_NO_PATHCONV=1 "$A" shell "monkey -p com.phoenix.read -c android.intent.cate
 | `DarkMode.java` / `DpiTweak.java` | 169/88 | 换肤 / 密度 | DPI 必须在 `onCreate` proceed **之前**改，改完必须 `recreate()` |
 | `Hosts.java` | 127 | 4 个包名 + 运行环境快照 | **纯数据类**：`RGModule` 继承 `XposedModule`，在模块 App 进程引用会 `NoClassDefFoundError` |
 | `SheetEntry.java` | 319 | 往播放设置弹层插「ReadGuo 设置」行 | ⚠️ 红果 7.4 起该弹层被重写成 Compose，**注入方式已失效**；7.3.9.32 仍可用 |
-| `MainActivity.java` | 1348 | 模块 App（四页 MIUI 风） | 无设置页（v3.08 起唯一入口是宿主内面板）；`Palette` 只能在 `onCreate` 取 |
+| `MainActivity.java` | 1900+ | 模块 App（主页 / 功能 / 关于三页） | 无设置页（v3.08 起唯一入口是宿主内面板）；功能页提供逐应用「重置」；`Palette` 只能在 `onCreate` 取 |
 | `CrashGuard.java` | 132 | 崩溃取证（宿主+模块 App 双装） | 写 `rgtools_crash.txt`，**不吞异常** |
 | `ModuleState.java` | 91 | 「模块是否激活」判定 | 只读日志 mtime（30 min 内=RUNNING），无 root 一律 UNKNOWN，禁止写死「已激活」 |
 | `Names.java`(92) / `RootShell.java`(164) | — | 规则→中文名 / su 封装 | — |
@@ -139,17 +140,13 @@ MSYS_NO_PATHCONV=1 adb shell "su -c 'cp /sdcard/xxx.xml /data/data/com.phoenix.r
 
 ---
 
-## 6. ⚠️ 三条产品线并存（最容易搞错的地方）
+## 6. 产品线：已收敛为单一源码线
 
-| 线 | 版本 | 来源 | 有什么 | 缺什么 |
-|---|---|---|---|---|
-| **A. 源码线** | 105 / 3.20 | `python module/build.py` → `out/RGTools-3.20.apk` | 两处隐藏修复（计数文案规则、暂停还原撤清单）、点选器+穿透、面板卡片化、番茄/畅听源码级适配 | 两级折叠（`SlotFold`） |
-| **B. 补丁线** | **111** / 3.19-测试 | 第三方 APK（酷安@紫米米粥）+ apktool 二次修改 + `classes3.dex` 反射补丁 | 两级折叠（大卡+小卡）、番茄面板「页面组件」卡 | A 的两处修复、点选在红果侧的完整版 |
-| **C. 混合包** | 111 / 3.20 | `out/ReadGuo-3.20-番茄适配.apk`（304756 B） | B 的补丁 + 部分 3.20 内容 | 与 A 不同源，**不能当作源码构建结果** |
+3.21 起只有一条线：`python module/build.py` → `out/RGTools-<版本>.apk`，可复现构建。
 
-- 设备上现在跑的是 **B（111）**，所以源码线的 105 装不上去。
-- C 的生成方式（apktool 二次打包）不是可复现构建：`resources.arsc` 必须 **STORED + 4 字节对齐**，否则 targetSdk 35 装不上。
-- **接手第一件事：问用户想收敛到哪条线。** 合理方向是把 `SlotFold` 的折叠逻辑用源码重写进 `SettingsPanel`，然后废弃 B/C，只保留 A 一条可复现构建线。不要默认“两条都维护”。
+- 曾经的「补丁线」（第三方 APK + apktool 二次修改，versionCode 111）与「混合包」（`ReadGuo-3.20-番茄适配.apk`）**均已废弃**，不要再基于它们改。
+- 两级折叠、编辑模式、撤销、逐应用重置等原补丁线功能，已全部用源码重写进 `SettingsPanel` / `PickerOverlay` / `EditGuard`。
+- 发版只发源码构建产物；`out/` 里的旧混合包仅作历史留档。
 
 ---
 
@@ -172,8 +169,8 @@ MSYS_NO_PATHCONV=1 adb shell "su -c 'cp /sdcard/xxx.xml /data/data/com.phoenix.r
 
 | # | 问题 | 影响 | 线索 / 建议 |
 |---|---|---|---|
-| P1 | **版本线分裂**（105 源码 vs 111 设备） | 无法直接把源码装到设备验证；两条线功能互缺 | 先定线。建议：源码提 versionCode → 121，把 `SlotFold` 折叠用源码补进 `SettingsPanel`，然后只维护 A |
-| P2 | **番茄小说 / 畅听从未实机验证** | `Fanqie`/`Ct`/`ScanHide`/`FanqiePanel` 全部只有静态核对 | 设备没装这两个 App。装一个（`com.dragon.read` 7.4.x / `com.xs.fm` 6.7.8），重点验：底栏是否真的不留空位、扫描清单能否列出、隐藏后切页是否稳定 |
+| P1 | ~~版本线分裂~~ **已解决** | 3.21 起单一源码线，设备已覆盖安装 112→116 | 无需处理；发版只发源码构建产物 |
+| P2 | **畅听仍有部分交互未回归** | `Ct` 的底栏 / 我的页已验；面板滚动、已隐藏清单、撤销待在 6.7.8 上确认 | 重点验：面板能否上下滑动、逐条恢复是否即时生效、「长按首页左侧 / 顶部中央」是否稳定 |
 | P3 | **视频容器锚点 `id=i62` 在红果 7.4 已消失** | 7.4 上「界面透明度」整层失效，只剩槽位/清单生效 | 换锚点：从播放器 View 上溯找页面根，**别再用混淆 id**。7.3.9.32 上 i62 仍有效，所以当前没炸 |
 | P4 | **播放页长按注入失效（7.4）** | 7.4 把播放设置弹层改成 Compose，`SheetEntry` 插的行不出现 | 面板还有底部「首页」长按入口保底，不致命。若要在 7.4 恢复，需另找 Compose 侧入口 |
 | P5 | 旧计数规则不会自愈（`@10.8万` 之类） | 用户历史清单里这类规则永远匹配不到 | 面板「组件显隐 → 清空」后重扫一次即可，无法自动迁移 |
@@ -212,17 +209,27 @@ MSYS_NO_PATHCONV=1 adb shell "su -c 'cp /sdcard/xxx.xml /data/data/com.phoenix.r
 
 ## 11. 发版
 
-仓库 `staciepomar-spec/RedGuo`。本地 git **长期是脏的**（3.06 之后没提交过），推完 `git status` 仍脏属正常，不要试图「整理干净」再发版。
+主仓 GitHub `staciepomar-spec/RedGuo`，镜像 Gitee `allray/RedGuo`（公开）。本地 git 现在是干净的，改动正常 commit 后双端推送：
 
-- 走 skill `github-release-when-git-blocked`：git 协议被墙，用 REST API + Git Data API 四步（blob → tree → commit → ref）推源码，再建 Release 传 APK。
-- token 从 `git-credential-manager.exe` 取，**用完删掉**。
-- 验包：遍历 dex `string_ids` 确认新版本串存在 + `aapt2 dump badging` 核 versionCode/versionName + `apksigner verify` 三项全 true。
+```bash
+git push origin main
+git push https://allray:<token>@gitee.com/allray/RedGuo.git main:master
+```
+
+**Gitee 发版**（GitHub 协议被墙时的主力渠道）：
+
+- REST API 建 Release：`POST /repos/allray/RedGuo/releases`（`tag_name` / `name` / `body` / `target_commitish`）
+- 上传 APK：`POST /repos/allray/RedGuo/releases/{id}/attach_files`（multipart）
+- token 从 `%APPDATA%\Trae CN\User\mcp.json` 的 `mcpServers.gitee.env.GITEE_ACCESS_TOKEN` 取，**不要写进仓库**
+- Gitee「发行版列表」侧栏按版本号固定排序，接口改不了顺序；新版本创建后自然排在末尾
+
+验包：`aapt2 dump badging` 核 versionCode/versionName + `apksigner verify` 三项全 true + 直链匿名下载核字节数。
 
 ---
 
 ## 12. 接手后的第一个动作建议
 
-1. 读 `.workbuddy/memory/2026-11-21.md`（最新、信息密度最高）→ 再看 `2026-11-20.md`。
+1. 读 `.workbuddy/memory/` 最近几篇（11-20 / 11-21 / 11-22），再读 `README.md` 的「更新日志」。
 2. `python module/build.py` 跑一遍，确认工具链完好（不改版本号，能出包即合格）。
 3. 连设备确认：宿主版本、模块版本、`rgtools_log.txt` 是否有新的 `install: ok`。
-4. **然后问用户 §8-P1 的取向**（收敛到哪条线），再动代码。
+4. 改动前先看 §8 待办，尤其是畅听的待回归项。
