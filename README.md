@@ -1,6 +1,6 @@
 # ReadGuo · 红果 / 番茄界面工具模块
 
-> 作者：残話/紫米米粥 · [GitHub](https://github.com/staciepomar-spec/RedGuo) · [Gitee](https://gitee.com/allray/RedGuo)
+> 作者：残話/紫米米粥 · [GitHub](https://github.com/staciepomar-spec/ReadGuo) · [Gitee](https://gitee.com/allray/ReadGuo)
 
 **当前版本：3.25（versionCode 116）** · LSPosed / libxposed API 100+
 
@@ -23,9 +23,9 @@
 
 | 渠道 | 地址 |
 |------|------|
-| Gitee Releases（推荐） | https://gitee.com/allray/RedGuo/releases |
-| 最新 APK 直链 | https://gitee.com/allray/RedGuo/releases/download/v3.25/RGTools-3.25.apk |
-| GitHub Releases | https://github.com/staciepomar-spec/RedGuo/releases |
+| Gitee Releases（推荐） | https://gitee.com/allray/ReadGuo/releases |
+| 最新 APK 直链 | https://gitee.com/allray/ReadGuo/releases/download/v3.25/RGTools-3.25.apk |
+| GitHub Releases | https://github.com/staciepomar-spec/ReadGuo/releases |
 
 历史版本见 Releases 页；自行编译见「从源码构建」。
 

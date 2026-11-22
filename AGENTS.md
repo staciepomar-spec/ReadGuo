@@ -1,4 +1,4 @@
-# AGENTS.md — RedGuo 目录约定
+# AGENTS.md — ReadGuo 目录约定
 
 > 本文件是 AI 与协作者的工作约定。**任何 AI 在读写本文件夹前必须遵守以下规则**，保持根目录整洁。
 

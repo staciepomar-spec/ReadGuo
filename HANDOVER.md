@@ -31,8 +31,8 @@
 | `out/` | 历史 APK（2.75→3.25），**勿清理**；`ReadGuo-3.20-番茄适配.apk` 是已废弃的混合包 | ❌ |
 | `.workbuddy/memory/` | 逐日工作日志（**最有价值的隐性知识**，11-20/11-21 两篇必读） | ❌ |
 | 签名密钥 | `C:\Users\Iss.WR\.workbuddy\keys\rgmod.jks`，pass `android`，alias `rgmod` | ❌ 仓库外 |
-| GitHub | `https://github.com/staciepomar-spec/RedGuo`（`origin`） | — |
-| Gitee | `https://gitee.com/allray/RedGuo`（镜像，已公开，10 个 release 已同步） | — |
+| GitHub | `https://github.com/staciepomar-spec/ReadGuo`（`origin`） | — |
+| Gitee | `https://gitee.com/allray/ReadGuo`（镜像，已公开，10 个 release 已同步） | — |
 
 **不在仓库里、必须问用户要的**：GitHub token（发版用，见 §11）、宿主 APK 样本、番茄/畅听安装包。
 
@@ -209,17 +209,17 @@ MSYS_NO_PATHCONV=1 adb shell "su -c 'cp /sdcard/xxx.xml /data/data/com.phoenix.r
 
 ## 11. 发版
 
-主仓 GitHub `staciepomar-spec/RedGuo`，镜像 Gitee `allray/RedGuo`（公开）。本地 git 现在是干净的，改动正常 commit 后双端推送：
+主仓 GitHub `staciepomar-spec/ReadGuo`，镜像 Gitee `allray/ReadGuo`（公开）。本地 git 现在是干净的，改动正常 commit 后双端推送：
 
 ```bash
 git push origin main
-git push https://allray:<token>@gitee.com/allray/RedGuo.git main:master
+git push https://allray:<token>@gitee.com/allray/ReadGuo.git main:master
 ```
 
 **Gitee 发版**（GitHub 协议被墙时的主力渠道）：
 
-- REST API 建 Release：`POST /repos/allray/RedGuo/releases`（`tag_name` / `name` / `body` / `target_commitish`）
-- 上传 APK：`POST /repos/allray/RedGuo/releases/{id}/attach_files`（multipart）
+- REST API 建 Release：`POST /repos/allray/ReadGuo/releases`（`tag_name` / `name` / `body` / `target_commitish`）
+- 上传 APK：`POST /repos/allray/ReadGuo/releases/{id}/attach_files`（multipart）
 - token 从 `%APPDATA%\Trae CN\User\mcp.json` 的 `mcpServers.gitee.env.GITEE_ACCESS_TOKEN` 取，**不要写进仓库**
 - Gitee「发行版列表」侧栏按版本号固定排序，接口改不了顺序；新版本创建后自然排在末尾
 
