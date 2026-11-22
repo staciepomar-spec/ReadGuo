@@ -15,11 +15,6 @@ public final class Config {
     public static final String MODULE_PKG = "com.wodi.redguotools";
     private static final String PREF = "rg_tools_cfg";
 
-    /* 状态栏底色 */
-    public static final int BG_FOLLOW = 0; // 跟随背景（不干预应用自身配色）
-    public static final int BG_BLACK = 1;  // 纯黑
-    public static final int BG_WHITE = 2;  // 纯白
-
     /* ---------------- 组件槽位表 ---------------- */
 
     /**
@@ -32,7 +27,7 @@ public final class Config {
     public static final String[] SLOT_KEYS = {
             "top", "right", "bottom",
             "plbar", "pldanmaku", "plheader", "plhot", "plbottom", "plprogress",
-            "feedfull", "feedrec", "feedtag", "luckybag",
+            "feedfull", "feedrec", "feedtag", "luckybag", "seedentry",
     };
 
     public static final String[] SLOT_NAMES = {
@@ -49,6 +44,7 @@ public final class Config {
             "备案号水印（首页卡片）",
             "类型标签（剧名下方）",
             "右侧「领取」挂件（福袋）",
+            "同款商品入口（卡片）",
     };
 
     /**
@@ -112,10 +108,17 @@ public final class Config {
             // boxOf 上溯到容器（高度上限 4×文字高、且子树里没有别的文案，正好停在
             // c42.e 这一层）。类名 c42.e 是混淆短名，换渠道会变，故不按类名匹配。
             {"text:领取"},
+            // 首页卡片「全屏观看」下方那条同款商品胶囊（电商 AI 种草入口，
+            // 文案形如「上身厚实质感 >」「日常好搭穿着舒服 >」，左侧挂商品图）。
+            // 它是 Lynx 渲染的 AnnieX 卡片：整棵子树里只有外层容器
+            // sameproduct.aiseed.p 是原生 View，里面全部由 Lynx 自绘，
+            // 树里看不到子节点 —— 所以只能隐藏这一层。
+            // 末段 p 是混淆短名（每次发版换字母），故用 pkg: 按包名包含匹配。
+            {"pkg:sameproduct.aiseed."},
     };
 
     public static String resolveHint() {
-        return "规则写法：类名（可只写后半段）/ @文案 / text:文案 / id:名字，多个用 | 分隔";
+        return "规则写法：类名（可只写后半段）/ @文案 / text:文案 / pkg:包名片段 / id:名字，多个用 | 分隔";
     }
 
     private static SharedPreferences sp;
@@ -127,6 +130,17 @@ public final class Config {
      * 注意：不能用 createPackageContext 去拿模块自己的 SharedPreferences——
      * 宿主进程与模块包不是同一个 UID，读到的是无法写入的目录，set 会静默失败。
      * 面板与 Hook 都跑在宿主进程里，因此直接用宿主自己的存储即可。
+     *
+     * <p><b>v3.07：跨进程导入已移除。</b>原先这里会从公共目录读一份模块 App 导出的
+     * 配置，实测那条通道在 Android 11+ 上<b>根本不成立</b>：
+     * <ul>
+     *   <li>文件是模块 App 用 MediaStore 建的，属主是它的 uid、权限 770，
+     *       宿主属于 others → {@code File.exists()} 恒 false；</li>
+     *   <li>MediaStore 兜底也读不了：宿�� targetSdk 35 且没有「所有文件访问」
+     *       授权，{@code openInputStream} 打不开别的 App 写的非媒体文件。</li>
+     * </ul>
+     * 留着只会静默失败，让用户以为「改了没生效」。设置一律在红果内面板里改，
+     * 那是唯一真正连通的通道。
      */
     public static synchronized void init(Context ctx) {
         if (sp != null || ctx == null) {
@@ -134,33 +148,6 @@ public final class Config {
         }
         Context app = ctx.getApplicationContext();
         sp = (app != null ? app : ctx).getSharedPreferences(PREF, Context.MODE_PRIVATE);
-
-        // 把模块 App 导到公共目录的配置读回来。
-        // 只在进程内第一次 init 时做一次 —— 之后所有 hook 读到的都是新值。
-        // 模块 App 进程也会走这里，于是它能看到红果侧的最新设置。
-        try {
-            int n = CfgBridge.importFrom(app != null ? app : ctx, sp);
-            if (n > 0) {
-                UiController.logFile("cfg-bridge: 已从公共目录导入 " + n + " 项配置");
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    /**
-     * 当前进程用的 SharedPreferences（模块 App 侧导出配置时用）。
-     * 宿主进程里拿它写进去的值，红果下次启动会从公共目录读回来。
-     */
-    static SharedPreferences spOf() {
-        return sp;
-    }
-
-    /** 把当前进程的配置导出到公共目录，供另一个进程读取。返回 null 表示成功。 */
-    static String exportAll(Context c) {
-        if (sp == null) {
-            init(c);
-        }
-        return CfgBridge.export(c, sp);
     }
 
     private static SharedPreferences sp(Context fallback) {
@@ -172,6 +159,11 @@ public final class Config {
 
     public static boolean ready() {
         return sp != null;
+    }
+
+    /** 包内取底层 SharedPreferences（EditGuard 拍配置快照用），别在别处复制 PREF 名。 */
+    static SharedPreferences prefs(Context c) {
+        return sp(c);
     }
 
     /* ---------------- 长按入口 ---------------- */
@@ -189,11 +181,6 @@ public final class Config {
 
     public static boolean hideStatusBar(Context c) {
         return get(c, "sb_hide", true);
-    }
-
-    /** 状态栏区域底色。 */
-    public static int statusBarBg(Context c) {
-        return getInt(c, "sb_bg", BG_FOLLOW);
     }
 
     /* 状态栏「点击显示数字」配置（sb_tap）已移除 —— 该功能整体下线。 */
@@ -256,6 +243,10 @@ public final class Config {
     public static boolean overlayHide(Context c, String k) {
         if ("luckybag".equals(k)) {
             return hideLuckyBag(c);
+        }
+        // 同款商品入口是宿主热更新后新塞进卡片的电商推广位，默认隐藏。
+        if ("seedentry".equals(k)) {
+            return get(c, "seedentry_hide", true);
         }
         return get(c, k + "_hide", false);
     }
@@ -565,6 +556,46 @@ public final class Config {
         }
     }
 
+    /* ---------------- 弹幕：强制显示 ---------------- */
+
+    /**
+     * 强制显示弹幕。默认关闭 —— 不开就完全保持宿主原样。
+     *
+     * <p>见 {@link Danmaku}：实现是写宿主自己的 SharedPreferences，不是 hook。
+     */
+    public static boolean danmakuForce(Context c) {
+        return get(c, "danmaku_force", false);
+    }
+
+    public static void setDanmakuForce(Context c, boolean v) {
+        set(c, "danmaku_force", v);
+    }
+
+    /**
+     * 强制打开之前，宿主那两个弹幕开关键的原始值（用于关闭时还原）。
+     *
+     * <p>格式 {@code <user键是否存在>|<user值>|<ab键是否存在>|<ab值>}，
+     * 空串表示「还没强制过」，即无需还原。
+     */
+    public static String danmakuBak(Context c) {
+        try {
+            return sp(c).getString("danmaku_force_bak", "");
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    public static void setDanmakuBak(Context c, String v) {
+        try {
+            sp(c).edit().putString("danmaku_force_bak", v == null ? "" : v).commit();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static void clearDanmakuBak(Context c) {
+        setDanmakuBak(c, "");
+    }
+
     /* ---------------- 净化：去广告 / 福袋 / 热更新 ---------------- */
 
     /**
@@ -619,6 +650,124 @@ public final class Config {
         set(c, "no_hotfix", v);
     }
 
+    /**
+     * 屏蔽「我的」页的游戏中心模块。默认开启。
+     *
+     * <p>走宿主自己的 AB 配置（{@code eggplant_my_tab_game_center.enable}），
+     * 不是 View 隐藏 —— 「我的」页整块是 Compose，View 层拿不到子节点，
+     * 详见 {@link MineTab}。
+     */
+    public static boolean hideGameCenter(Context c) {
+        return get(c, "hide_game_center", true);
+    }
+
+    public static void setHideGameCenter(Context c, boolean v) {
+        set(c, "hide_game_center", v);
+    }
+
+    /* ---------------- 番茄免费小说（com.dragon.read） ---------------- */
+
+    /**
+     * 屏蔽番茄底部「赚钱」tab（{@code BottomTabBarItemType.LuckyBenefit}）。默认开启。
+     *
+     * <p>做法是让宿主的 tab 工厂返回 null —— 这个方法本来就会返回 null（商城/福利关掉时
+     * 也这么返回），所以底栏不会留空位。见 {@link Fanqie}。
+     */
+    public static boolean hideFanqieEarnTab(Context c) {
+        return get(c, "fq_hide_earn_tab", true);
+    }
+
+    public static void setHideFanqieEarnTab(Context c, boolean v) {
+        set(c, "fq_hide_earn_tab", v);
+    }
+
+    /**
+     * 番茄畅听（{@code com.xs.fm}）：底栏只留「首页」「我的」。
+     *
+     * <p>要去的三项在 6.7.8 上是「商城 / 听歌 / 领现金」（不同灰度还会出现
+     * 「领金币」「福利」），见 {@link Ct#HIDE_WORDS}。默认开启。
+     */
+    public static boolean ctHideTabs(Context c) {
+        return get(c, "ct_hide_tabs", true);
+    }
+
+    public static void setCtHideTabs(Context c, boolean v) {
+        set(c, "ct_hide_tabs", v);
+    }
+
+    /**
+     * 番茄畅听：关掉全部广告位。默认开启。
+     *
+     * <p>锚点是 {@code com.dragon.read.base.ad.AdConfigManager#checkAdAvailable(String,String)}
+     * —— 和红果 7.x 的 {@code NsAdImpl#checkAdAvailable} 同一语义（true=该广告位可用），
+     * 只是 6.7.8 换了个类。宿主的每一个广告位在展示前都会问它一次。
+     */
+    public static boolean ctBlockAds(Context c) {
+        return get(c, "ct_block_ads", true);
+    }
+
+    public static void setCtBlockAds(Context c, boolean v) {
+        set(c, "ct_block_ads", v);
+    }
+
+    /** 番茄畅听：「我的」页去掉金刚位（电商卡）和「我的资产」两块。默认开启。 */
+    public static boolean ctSlimMine(Context c) {
+        return get(c, "ct_slim_mine", true);
+    }
+
+    public static void setCtSlimMine(Context c, boolean v) {
+        set(c, "ct_slim_mine", v);
+    }
+
+    /** 番茄畅听：去掉「我的」页右上角的四宫格（全部功能入口）。默认开启。 */
+    public static boolean ctHideAllFunc(Context c) {
+        return get(c, "ct_hide_allfunc", true);
+    }
+
+    public static void setCtHideAllFunc(Context c, boolean v) {
+        set(c, "ct_hide_allfunc", v);
+    }
+
+    /**
+     * 精简番茄「我的」页的功能入口格（{@code isCellTypeShowable} 恒 false）。默认开启。
+     *
+     * <p>只影响"功能入口"那一列（视频创作/兴趣偏好/我的笔记/活动中心…），
+     * 头像、右上角设置、我的消息不在这一套里。
+     */
+    public static boolean hideFanqieMineCells(Context c) {
+        return get(c, "fq_hide_mine_cells", true);
+    }
+
+    public static void setHideFanqieMineCells(Context c, boolean v) {
+        set(c, "fq_hide_mine_cells", v);
+    }
+
+    /**
+     * 「我的」页功能入口的白名单：返回 true 的 cell 保留。
+     *
+     * <p>宿主用 {@code MyTabCellType} 的 int 值标识每格。目前需求是"除了头像/设置/我的消息
+     * 其余全去"，而这三项都不走 cell 通道，所以这里暂时一律返回 false。
+     * 若实测发现某项被误删，把它的编号加进来即可。
+     */
+    public static boolean fanqieMineKeep(int cell) {
+        return false;
+    }
+
+    /**
+     * 拦掉番茄启动时的各种弹窗（活动、签到、福利、升级、青少年提示…）。默认开启。
+     *
+     * <p>只在进程起来后的 10 秒窗口内生效 —— 那正是「一进软件」弹东西的时间段。
+     * 不按内容白名单过滤，因为宿主每周换一套活动文案，名单追不上；
+     * 也不做全局拦截，否则分享、登录确认这些真需要点的 Dialog 也会被吞掉。
+     */
+    public static boolean blockFanqiePopups(Context c) {
+        return get(c, "fq_block_popups", true);
+    }
+
+    public static void setBlockFanqiePopups(Context c, boolean v) {
+        set(c, "fq_block_popups", v);
+    }
+
     /* ---------------- 写 ---------------- */
 
     public static void set(Context c, String key, boolean v) {
@@ -643,7 +792,7 @@ public final class Config {
         }
     }
 
-    private static int getInt(Context c, String key, int def) {
+    public static int getInt(Context c, String key, int def) {
         try {
             return sp(c).getInt(key, def);
         } catch (Throwable t) {

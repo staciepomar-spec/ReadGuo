@@ -12,7 +12,6 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.CompoundButton;
@@ -31,14 +30,16 @@ import java.util.HashSet;
 import java.util.List;
 
 /**
- * 模块设置界面（**全屏**，不是浮窗）。
+ * 模块设置界面（**居中卡片**：92% 宽 × 82% 高，圆角，外部压暗）。
  *
  * <p>信息架构（v2.95）：一级只列分组标题，点进去才是二级的具体设置，
  * 避免一屏塞下全部配置。五个分组 —— 界面显示 / 底部区域 / 播放控制 /
  * 面板与交互 / 高级·自定义；二级页里纯开关项一律不折叠，只有内容多于一条的
  * （组件显隐、底部标签栏、倍速细节、自定义清单）才用折叠行，折叠头自带状态摘要。
+ * 「组件显隐 / 自定义隐藏清单」两卡再套两级折叠：整卡大折叠 + 每行小折叠，
+ * 默认收起，打开才见内容（折叠构建统一走 foldRow）。
  *
- * <p>进入面板时会**先暂停视频**（全屏界面盖住画面，继续播没有意义）；
+ * <p>进入面板时会**先暂停视频**（画面静止更利于比对透明度/隐藏效果）；
  * 返回键在二级页回一级，在一级页关闭面板。
  */
 public final class SettingsPanel {
@@ -46,10 +47,11 @@ public final class SettingsPanel {
     private static final String TAG = RGModule.TAG;
     private static android.app.Dialog sDialog;
 
-    /* 全屏面板的导航状态：null = 一级（分组列表），否则是当前分组 key。 */
+    /* 面板导航状态：null = 一级（分组列表），否则是当前分组 key。 */
     private static String sGroup;
     private static String sTitle;
     private static LinearLayout sContent;
+    private static LinearLayout sActions;
     private static TextView sHeaderTitle;
     private static TextView sBack;
     private static Activity sActivity;
@@ -59,6 +61,20 @@ public final class SettingsPanel {
 
     public static boolean isShowing() {
         return sDialog != null && sDialog.isShowing();
+    }
+
+    /** 悬浮球点选前先收面板 —— 点选要能点到宿主页面本身。 */
+    static void dismissForPicker() {
+        if (sDialog != null) {
+            sDialog.dismiss();
+        }
+    }
+
+    /** 悬浮球「列表模式」复用面板的扫描清单。 */
+    static void openScan(Activity a) {
+        if (a != null) {
+            scanDialog(a);
+        }
     }
 
     /**
@@ -72,14 +88,22 @@ public final class SettingsPanel {
         if (sDialog == null || !sDialog.isShowing() || fg == null || sActivity == fg) {
             return;
         }
+        if (dead(fg)) {
+            return;
+        }
         final String keep = sGroup;
         try {
             sDialog.dismiss();
         } catch (Throwable ignored) {
         }
-        show(fg);
-        if (keep != null && sDialog != null) {
-            renderGroup(fg, Theme.of(fg), keep, groupTitleOf(keep));
+        try {
+            show(fg);
+            if (keep != null && sDialog != null) {
+                renderGroup(fg, Theme.of(fg), keep, groupTitleOf(keep));
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "ensureOn failed", t);
+            UiController.crashDump("ensureOn", t);
         }
     }
 
@@ -97,18 +121,31 @@ public final class SettingsPanel {
     }
 
     public static void show(final Activity a) {
-        if (isShowing()) {
+        if (isShowing() || dead(a)) {
             return;
         }
-        final Theme.Palette p = Theme.of(a);
+        final Theme.Palette p;
+        try {
+            p = Theme.of(a);
+        } catch (Throwable t) {
+            UiController.crashDump("show:palette", t);
+            return;
+        }
 
-        // 全屏界面一盖，视频继续播既看不见也没意义 —— 进来先暂停。
+        // 面板一开就暂停：静止画面便于比对透明度/隐藏效果，也省得边调边有声音。
         // 只暂停不自动恢复：用户关掉面板后自己点一下继续更符合预期。
         PlayerTweaks.pauseCurrent();
 
         LinearLayout root = new LinearLayout(a);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(p.bg);
+        // 卡片化：圆角 + 细描边，内容按圆角裁剪（面板不再铺满全屏）
+        android.graphics.drawable.GradientDrawable cardBg =
+                new android.graphics.drawable.GradientDrawable();
+        cardBg.setColor(p.bg);
+        cardBg.setCornerRadius(Theme.dp(a, 18));
+        cardBg.setStroke(Math.max(1, Theme.dp(a, 0.5f)), p.stroke);
+        root.setBackground(cardBg);
+        root.setClipToOutline(true);
 
         /* ---------- 顶部栏：← 返回 / 居中标题 / 关闭 ---------- */
         FrameLayout bar = new FrameLayout(a);
@@ -168,6 +205,33 @@ public final class SettingsPanel {
         root.addView(bar, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, barH));
 
+        /* ---------- 固定操作行：扫描 / 手动添加（在 ScrollView 之前，不随列表滚动） ---------- */
+        LinearLayout actions = new LinearLayout(a);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        int ap = Theme.dp(a, 16);
+        actions.setPadding(ap, 0, ap, Theme.dp(a, 8));
+        actions.addView(Theme.filledButton(a, p, "点选隐藏", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                PickerOverlay.start(a);
+            }
+        }), weight(1f, 0));
+        actions.addView(Theme.outlineButton(a, p, "扫描当前页面", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                scanDialog(a);
+            }
+        }), weight(1.5f, 6));
+        actions.addView(Theme.outlineButton(a, p, "手动添加", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                addDialog(a);
+            }
+        }), weight(1.1f, 6));
+        root.addView(actions, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        sActions = actions;
+
         /* ---------- 内容区（一级 / 二级共用） ---------- */
         ScrollView sv = new ScrollView(a);
         sv.setClipToPadding(false);
@@ -204,31 +268,16 @@ public final class SettingsPanel {
         android.view.Window w = d.getWindow();
         if (w != null) {
             /*
-             * 参考稿要的是「干净的浅色页面」，不是重透明玻璃：
-             * 底色用不透明的 #F7F8FA，卡片纯白 + 柔和阴影。
-             * （重透明会让视频画面透上来，观感发灰、字也被拖脏。）
+             * 卡片式：留出背景，调开关时还能看到页面变化。
+             * 窗口本身不贴屏幕边，系统栏压不到内容，所以不再需要
+             * decorFitsSystemWindows / 隐藏状态栏 / insets 补边这一套。
              */
-            w.setBackgroundDrawable(new ColorDrawable(p.bg));
-            w.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-            w.setGravity(Gravity.TOP | Gravity.START);
-            // 全屏界面不该压暗自己身后的东西；系统栏内边距由 insets 监听补
-            w.setDimAmount(0f);
-            w.clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            try {
-                if (android.os.Build.VERSION.SDK_INT >= 30) {
-                    w.setDecorFitsSystemWindows(false);
-                }
-                // 宿主设置了「隐藏系统状态栏」时，设置页也一起隐藏 ——
-                // 否则全屏面板顶上会突然冒出一条系统状态栏，观感割裂。
-                if (Config.hideStatusBar(a)) {
-                    android.view.WindowInsetsController ic = w.getInsetsController();
-                    if (ic != null) {
-                        ic.hide(WindowInsets.Type.statusBars());
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
-            applyWindowInsets(w.getDecorView());
+            android.util.DisplayMetrics dm = a.getResources().getDisplayMetrics();
+            w.setBackgroundDrawable(new ColorDrawable(0));           // 透明，圆角由内容根负责
+            w.setLayout(Math.round(dm.widthPixels * 0.92f), Math.round(dm.heightPixels * 0.82f));
+            w.setGravity(Gravity.CENTER);
+            w.setDimAmount(0.45f);
+            w.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
         }
 
         d.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
@@ -242,6 +291,7 @@ public final class SettingsPanel {
                 sDialog = null;
                 sGroup = null;
                 sContent = null;
+                sActions = null;
                 sHeaderTitle = null;
                 sBack = null;
                 sActivity = null;
@@ -258,23 +308,6 @@ public final class SettingsPanel {
         }
     }
 
-    /** 全屏窗口自己补系统栏内边距（宿主 targetSdk 35，边到边是强制行为）。 */
-    private static void applyWindowInsets(View decor) {
-        try {
-            decor.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
-                @Override
-                public WindowInsets onApplyWindowInsets(View v, WindowInsets ins) {
-                    android.graphics.Insets b = ins.getInsets(
-                            WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-                    v.setPadding(0, b.top, 0, b.bottom);
-                    return ins;
-                }
-            });
-            decor.requestApplyInsets();
-        } catch (Throwable ignored) {
-        }
-    }
-
     /* ==================== 一级：分组列表 ==================== */
 
     private static void renderHome(final Activity a, final Theme.Palette p) {
@@ -283,6 +316,9 @@ public final class SettingsPanel {
         }
         sGroup = null;
         sTitle = null;
+        if (sActions != null) {
+            sActions.setVisibility(View.VISIBLE);
+        }
         if (sBack != null) {
             sBack.setVisibility(View.INVISIBLE);
         }
@@ -409,6 +445,10 @@ public final class SettingsPanel {
         }
         sGroup = key;
         sTitle = title;
+        // 扫描/手动添加只在「组件显隐」页相关：其它页收起来，免得占地方
+        if (sActions != null) {
+            sActions.setVisibility("slots".equals(key) ? View.VISIBLE : View.GONE);
+        }
         if (sBack != null) {
             sBack.setVisibility(View.VISIBLE);
         }
@@ -423,6 +463,7 @@ public final class SettingsPanel {
             // 组件显隐 + 自定义隐藏清单：两者都是「按规则挑元素」，放同一页最顺
             buildSlotsGroup(a, p, sContent);
             buildAdvancedGroup(a, p, sContent);
+            buildClearRow(a, p, sContent);
         } else if ("play".equals(key)) {
             buildPlaybackGroup(a, p, sContent);
         } else if ("clean".equals(key)) {
@@ -501,9 +542,40 @@ public final class SettingsPanel {
                                     String text, boolean checked,
                                     CompoundButton.OnCheckedChangeListener l) {
         Switch sw = Theme.makeSwitch(a, p, text, checked);
-        sw.setOnCheckedChangeListener(l);
+        sw.setOnCheckedChangeListener(guard(text, l));
         parent.addView(sw);
         return sw;
+    }
+
+    /**
+     * 给开关回调包一层护栏。
+     *
+     * <p><b>为什么必须包</b>：这些回调跑在**宿主进程的主线程**上，且直接
+     * {@code Config.set()} → {@code refresh()} → 可能 {@code recreate()}。
+     * 里面任何一处抛异常，都是整个红果闪退，而用户那边只会得到一句
+     * 「点了开关就崩」，连是哪一行都不知道 —— 已经收到过这种反馈。
+     * <p>
+     * 包住之后：异常变成一条日志 + 一次提示，界面还在，其它开关照样能用。
+     * 这不是掩盖问题，是把「一次闪退」降级成「一个功能不生效」，
+     * 同时把现场（堆栈）留下来。
+     */
+    private static CompoundButton.OnCheckedChangeListener guard(
+            final String what, final CompoundButton.OnCheckedChangeListener l) {
+        if (l == null) {
+            return null;
+        }
+        return new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton b, boolean v) {
+                try {
+                    l.onCheckedChanged(b, v);
+                } catch (Throwable t) {
+                    Log.e(TAG, "switch failed: " + what, t);
+                    UiController.logFile("panel: switch '" + what + "' failed " + t);
+                    UiController.crashDump("switch:" + what, t);
+                }
+            }
+        };
     }
 
     /** 折叠行：标题 + 状态摘要 + 箭头，点击展开/收起 body；状态按 key 持久化。 */
@@ -518,9 +590,17 @@ public final class SettingsPanel {
         }
     }
 
-    private static Expander expander(final Activity a, final Theme.Palette p,
-                                     LinearLayout parent, final String key, String title,
-                                     String summary, boolean defaultFolded) {
+    /**
+     * 两级折叠共用的折叠行：标题行「标题 + 状态摘要 + ▶/▼」，**整行可点**，
+     * 展开/收起直接 GONE/VISIBLE（不做动画）。两张大折叠卡与所有小折叠行
+     * 全走这里，样式天然一致（标题 17sp / 摘要 13sp / 箭头 12sp）。
+     *
+     * @param key 非 null 时按 key 记忆展开状态（expander 老用法）；
+     *            null 时每次打开默认收起，不写配置（槽位/条目行、两张大折叠卡）
+     */
+    private static Expander foldRow(final Activity a, final Theme.Palette p,
+                                    LinearLayout parent, final String key, String title,
+                                    String summary, boolean defaultFolded) {
         final LinearLayout body = new LinearLayout(a);
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(0, Theme.dp(a, 2), 0, Theme.dp(a, 2));
@@ -550,17 +630,27 @@ public final class SettingsPanel {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         final Expander ex = new Expander(body, sum);
-        ex.folded = Config.folded(a, key, defaultFolded);
+        ex.folded = key != null ? Config.folded(a, key, defaultFolded) : defaultFolded;
         applyFold(ex, arrow);
+        // 点击热区覆盖整条标题行
         header.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 ex.folded = !ex.folded;
-                Config.setFolded(a, key, ex.folded);
+                if (key != null) {
+                    Config.setFolded(a, key, ex.folded);
+                }
                 applyFold(ex, arrow);
             }
         });
         return ex;
+    }
+
+    /** 按 key 记忆展开状态的折叠行（倍速细节卡），样式与两级折叠共用 foldRow。 */
+    private static Expander expander(final Activity a, final Theme.Palette p,
+                                     LinearLayout parent, final String key, String title,
+                                     String summary, boolean defaultFolded) {
+        return foldRow(a, p, parent, key, title, summary, defaultFolded);
     }
 
     private static void applyFold(Expander ex, TextView arrow) {
@@ -606,6 +696,30 @@ public final class SettingsPanel {
         return list.size() + " 项 · 隐藏 " + on;
     }
 
+    /** 槽位小折叠头摘要：「显示·100%」/「已隐藏·80%」，开关/滑杆改动后回读实时值。 */
+    private static String slotItemSummary(Activity a, String key) {
+        return (Config.overlayHide(a, key) ? "已隐藏" : "显示")
+                + "·" + Config.overlayAlpha(a, key) + "%";
+    }
+
+    /**
+     * 自定义条目小折叠头摘要：「隐藏·80%」/「显示·100%」。条目是清单项不是槽位，
+     * 必须按条目自身 {rule, hide, alpha} 算；patch() 写的是配置新副本、手里的
+     * item 会过期，所以一律回读配置里的实时值。
+     */
+    private static String customItemSummary(Activity a, String[] item) {
+        String hide = item[1];
+        String alpha = item[2];
+        for (String[] it : Config.overlayList(a)) {
+            if (it[0].equals(item[0])) {
+                hide = it[1];
+                alpha = it[2];
+                break;
+            }
+        }
+        return ("1".equals(hide) ? "隐藏" : "显示") + "·" + alpha + "%";
+    }
+
     private static String cleanSummary(Activity a) {
         int on = 0;
         if (Config.adGate(a)) {
@@ -641,25 +755,6 @@ public final class SettingsPanel {
                         UiController.refresh(a);
                     }
                 });
-        divider(a, p, card);
-
-        // 状态栏底色：iOS 分段控件（比一排单选按钮更贴近原生观感）
-        TextView lbl = Theme.plain(a, p, "状态栏底色");
-        lbl.setPadding(0, Theme.dp(a, 14), 0, Theme.dp(a, 8));
-        card.addView(lbl);
-        LinearLayout seg = Theme.segmented(a, p,
-                new String[]{"跟随背景", "纯黑", "纯白"}, Config.statusBarBg(a),
-                new Theme.OnSegment() {
-                    @Override
-                    public void onSelect(int i) {
-                        Config.setInt(a, "sb_bg", i);
-                        UiController.refresh(a);
-                    }
-                });
-        LinearLayout.LayoutParams segLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        segLp.bottomMargin = Theme.dp(a, 14);
-        card.addView(seg, segLp);
 
         /* ---------- 2. 导航栏 ---------- */
         LinearLayout navCard = groupCard(a, p, root, "导航栏", false);
@@ -852,9 +947,19 @@ public final class SettingsPanel {
                         Config.setBlockHotfix(a, v);
                     }
                 });
+        divider(a, p, miscCard);
+        switchRow(a, p, miscCard, "屏蔽游戏中心", Config.hideGameCenter(a),
+                new CompoundButton.OnCheckedChangeListener() {
+                    @Override
+                    public void onCheckedChanged(CompoundButton b, boolean v) {
+                        Config.setHideGameCenter(a, v);
+                    }
+                });
         TextView miscHint = Theme.hint(a, p,
                 "「禁用热更新」在 Play 版上无效——该渠道本身不含热更新框架。"
-                        + "改动在红果下次启动时生效。");
+                        + "改动在红果下次启动时生效。\n"
+                        + "「屏蔽游戏中心」走宿主自己的 AB 配置（eggplant_my_tab_game_center.enable），"
+                        + "整块不渲染；同样需重启红果。");
         miscHint.setPadding(0, Theme.dp(a, 2), 0, Theme.dp(a, 6));
         miscCard.addView(miscHint);
     }
@@ -864,16 +969,19 @@ public final class SettingsPanel {
     private static void buildSlotsGroup(final Activity a, final Theme.Palette p,
                                         LinearLayout root) {
         LinearLayout card = groupCard(a, p, root, "组件显隐", true);
+        // 整卡大折叠：标题行 = 「组件显隐」+ 状态摘要 + 箭头，
+        // 14 个槽位行全收进折叠体（默认收起）。白卡沿用原画法，不套卡。
+        final Expander ex = foldRow(a, p, card, null, "组件显隐", slotsSummary(a), true);
         TextView hint = Theme.hint(a, p,
                 "开 = 隐藏该组件；滑杆 = 单项透明度（再乘「界面透明度」）。"
                         + "首页信息流与二级播放页共用同一套规则。");
         hint.setPadding(0, Theme.dp(a, 6), 0, Theme.dp(a, 2));
-        card.addView(hint);
+        ex.body.addView(hint);
         for (int i = 0; i < Config.SLOT_KEYS.length; i++) {
             if (i > 0) {
-                divider(a, p, card);
+                divider(a, p, ex.body);
             }
-            addSlotRow(a, p, card, Config.SLOT_KEYS[i], Config.SLOT_NAMES[i], null);
+            addSlotRow(a, p, ex.body, Config.SLOT_KEYS[i], Config.SLOT_NAMES[i], ex);
         }
     }
 
@@ -936,6 +1044,24 @@ public final class SettingsPanel {
                         Config.setMaxQuality(a, v);
                     }
                 });
+        divider(a, p, card);
+
+        switchRow(a, p, card, "强制显示弹幕", Config.danmakuForce(a),
+                new CompoundButton.OnCheckedChangeListener() {
+                    @Override
+                    public void onCheckedChanged(CompoundButton b, boolean v) {
+                        Config.setDanmakuForce(a, v);
+                        Danmaku.apply(a);
+                    }
+                });
+        TextView dmHint = Theme.hint(a, p,
+                "有些设备/账号上宿主下发的弹幕默认值是关的，弹幕就怎么都不出来。"
+                        + "打开后本模块会直接把宿主自己的弹幕开关写成开启（下次进入播放页生效）。"
+                        + "关闭时：以前自己拨过弹幕开关的会按原值还原；"
+                        + "从没拨过的（就是没弹幕的那类设备）宿主存储层删不掉这个键，"
+                        + "需要在红果自己的弹幕开关里关掉。");
+        dmHint.setPadding(0, 0, 0, Theme.dp(a, 6));
+        card.addView(dmHint);
         divider(a, p, card);
 
         switchRow(a, p, card, "自定义倍速（关闭 = 跟随宿主）", Config.speedCustomOn(a),
@@ -1094,13 +1220,15 @@ public final class SettingsPanel {
 
     private static void buildAdvancedGroup(final Activity a, final Theme.Palette p,
                                            LinearLayout root) {
-        LinearLayout card = groupCard(a, p, root, "自定义隐藏清单", false);
+        // 大折叠头自带「自定义隐藏清单」标题，groupCard 灰标题传 null 去掉重复标题
+        LinearLayout card = groupCard(a, p, root, null, false);
+        // 灰标题去掉后，它原来的 24dp 上边距改由卡片自己带，两卡间隔不变
+        ((LinearLayout.LayoutParams) card.getLayoutParams()).topMargin = Theme.dp(a, 24);
 
-        // 低频/调试：默认折叠。清单内容 + 调试按钮都收在这里
-        Expander ex = expander(a, p, card, "adv", "自定义隐藏清单",
-                customSummary(a), true);
+        // 整卡大折叠：样式与「组件显隐」卡完全一致，条目收进折叠体（默认收起）
+        final Expander ex = foldRow(a, p, card, null, "自定义隐藏清单", customSummary(a), true);
 
-        // 小白条诊断：只在高级组露出，主视图不给它留行
+        // 小白条诊断：只在本卡露出，主视图不给它留行
         TextView navDiag = Theme.hint(a, p, "小白条诊断：" + UiController.navBarStatus(a));
         navDiag.setPadding(0, 0, 0, Theme.dp(a, 6));
         ex.body.addView(navDiag);
@@ -1116,34 +1244,27 @@ public final class SettingsPanel {
             ex.body.addView(empty);
         }
         for (int i = 0; i < list.size(); i++) {
-            addCustomRow(a, p, ex.body, list, i);
+            addCustomRow(a, p, ex.body, list, i, ex);
         }
+    }
 
-        LinearLayout tools = new LinearLayout(a);
-        tools.setOrientation(LinearLayout.HORIZONTAL);
-        tools.setPadding(0, Theme.dp(a, 8), 0, 0);
-        tools.addView(Theme.filledButton(a, p, "扫描当前页面", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                scanDialog(a);
-            }
-        }), weight(1.4f, 0));
-        tools.addView(Theme.outlineButton(a, p, "手动添加", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                addDialog(a);
-            }
-        }), weight(1f, 8));
-        tools.addView(Theme.dangerButton(a, p, "清空", new View.OnClickListener() {
+    /**
+     * 「清空」单独放页尾：与扫描/手动添加分开，避免同排误触。
+     * 只清这份清单，其它设置不动（与原行为一致）。
+     */
+    private static void buildClearRow(final Activity a, final Theme.Palette p, LinearLayout root) {
+        TextView hint = Theme.hint(a, p, "清空隐藏与自定义清单（仅清空这份清单，其它设置不变）");
+        hint.setPadding(0, Theme.dp(a, 20), 0, Theme.dp(a, 6));
+        root.addView(hint);
+        root.addView(Theme.dangerButton(a, p, "清空", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 Config.setOverlayList(a, new ArrayList<String[]>());
                 UiController.refresh(a);
                 rebuild(a);
             }
-        }), weight(0.8f, 8));
-        ex.body.addView(tools);
-
+        }), new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     /* ==================== 滑杆块 ==================== */
@@ -1190,43 +1311,84 @@ public final class SettingsPanel {
 
     /** 清单/开关结构变了直接重建比增量刷新简单可靠。 */
     private static void rebuild(final Activity a) {
-        // 重建前记住当前分组：全屏两级结构下，重建后回到一级会让用户
+        if (dead(a)) {
+            return;
+        }
+        // 重建前记住当前分组：两级结构下，重建后回到一级会让用户
         // 刚操作的二级页「跳走」，体验很差。
         final String keep = sGroup;
-        if (sDialog != null) {
-            sDialog.dismiss();
-        }
-        a.getWindow().getDecorView().post(new Runnable() {
-            @Override
-            public void run() {
-                show(a);
-                if (keep != null && sDialog != null) {
-                    renderGroup(a, Theme.of(a), keep, groupTitleOf(keep));
-                }
+        try {
+            if (sDialog != null) {
+                sDialog.dismiss();
             }
-        });
+        } catch (Throwable t) {
+            UiController.crashDump("rebuild:dismiss", t);
+        }
+        try {
+            a.getWindow().getDecorView().post(new Runnable() {
+                @Override
+                public void run() {
+                    // post 回来时页面可能已经被宿主换掉（DPI 重建、暗色换肤、切剧），
+                    // 对着死掉的 Activity new Dialog + show 会抛 BadTokenException，
+                    // 而这正好是「点了某个开关就闪退」的典型现场。
+                    if (dead(a)) {
+                        return;
+                    }
+                    try {
+                        show(a);
+                        if (keep != null && sDialog != null) {
+                            renderGroup(a, Theme.of(a), keep, groupTitleOf(keep));
+                        }
+                    } catch (Throwable t) {
+                        Log.e(TAG, "rebuild failed", t);
+                        UiController.crashDump("rebuild:show", t);
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            UiController.crashDump("rebuild:post", t);
+        }
+    }
+
+    /** Activity 是否已经不可用（正在结束 / 已销毁 / 窗口没了）。 */
+    private static boolean dead(Activity a) {
+        if (a == null) {
+            return true;
+        }
+        try {
+            if (a.isFinishing() || a.isDestroyed()) {
+                return true;
+            }
+            return a.getWindow() == null || a.getWindow().getDecorView() == null;
+        } catch (Throwable t) {
+            return true;
+        }
     }
 
     /* ---------------- 行构建 ---------------- */
 
-    private static void addSlotRow(final Activity a, final Theme.Palette p, LinearLayout card,
-                                   final String key, String name, final Expander ex) {
-        Switch sw = Theme.makeSwitch(a, p, "隐藏 " + name, Config.overlayHide(a, key));
+    private static void addSlotRow(final Activity a, final Theme.Palette p, LinearLayout parent,
+                                   final String key, String name, final Expander cardEx) {
+        // 单项小折叠：标题行 = 槽位名 + 状态摘要（显示/已隐藏·透明度）+ 箭头，
+        // 展开才出开关+滑杆。摘要在每次改动后回读实时值。
+        final Expander fold = foldRow(a, p, parent, null, name, slotItemSummary(a, key), true);
+
+        // 槽位名已在折叠头，开关文案只留动作词「隐藏」，与自定义条目行一致（去重）
+        Switch sw = Theme.makeSwitch(a, p, "隐藏", Config.overlayHide(a, key));
         sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(CompoundButton b, boolean v) {
                 Config.setOverlayHide(a, key, v);
                 UiController.refresh(a);
-                if (ex != null) {
-                    ex.summary.setText(slotsSummary(a));
-                }
+                fold.summary.setText(slotItemSummary(a, key));
+                cardEx.summary.setText(slotsSummary(a));   // 大折叠摘要跟着变
             }
         });
-        card.addView(sw);
+        fold.body.addView(sw);
 
-        // 所属组件已由上面那行开关点明，这里只留数值
+        // 所属组件已由折叠头点明，这里只留数值
         final TextView label = Theme.value(a, p, "透明度：" + Config.overlayAlpha(a, key) + "%");
-        card.addView(label);
+        fold.body.addView(label);
 
         SeekBar bar = new SeekBar(a);
         bar.setMax(100);
@@ -1239,16 +1401,22 @@ public final class SettingsPanel {
                 if (fromUser) {
                     Config.setInt(a, key + "_alpha", value);
                     UiController.refresh(a);
+                    fold.summary.setText(slotItemSummary(a, key));
                 }
             }
         });
-        card.addView(bar);
+        fold.body.addView(bar);
     }
 
-    private static void addCustomRow(final Activity a, final Theme.Palette p, LinearLayout card,
-                                     final List<String[]> list, final int index) {
+    private static void addCustomRow(final Activity a, final Theme.Palette p, LinearLayout parent,
+                                     final List<String[]> list, final int index,
+                                     final Expander cardEx) {
         final String[] item = list.get(index);
         String[] n = Names.describe(item[0]);
+
+        // 单项小折叠：标题与原行同款（Names.describe），摘要按条目自身 {hide, alpha} 算
+        final Expander fold = foldRow(a, p, parent, null, n[0] + " " + n[1],
+                customItemSummary(a, item), true);
 
         LinearLayout line = new LinearLayout(a);
         line.setOrientation(LinearLayout.HORIZONTAL);
@@ -1261,6 +1429,7 @@ public final class SettingsPanel {
         TextView name = Theme.plain(a, p, n[0] + " " + n[1]);
         name.setTextColor(p.title);
         name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        name.setVisibility(View.GONE);   // 标题已在折叠头，折叠体内 GONE 去重
         nameCol.addView(name);
         TextView rule = Theme.hint(a, p, item[0]);
         rule.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
@@ -1288,19 +1457,21 @@ public final class SettingsPanel {
         del.setPadding(Theme.dp(a, 12), Theme.dp(a, 4), Theme.dp(a, 12), Theme.dp(a, 4));
         line.addView(del, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        card.addView(line);
+        fold.body.addView(line);
 
         Switch sw = Theme.makeSwitch(a, p, "隐藏", "1".equals(item[1]));
         sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(CompoundButton b, boolean v) {
                 patch(a, item[0], "hide", v ? "1" : "0");
+                fold.summary.setText(customItemSummary(a, item));
+                cardEx.summary.setText(customSummary(a));   // 大折叠摘要跟着变
             }
         });
-        card.addView(sw);
+        fold.body.addView(sw);
 
         final TextView label = Theme.value(a, p, "透明度：" + item[2] + "%");
-        card.addView(label);
+        fold.body.addView(label);
 
         SeekBar bar = new SeekBar(a);
         bar.setMax(100);
@@ -1315,10 +1486,11 @@ public final class SettingsPanel {
                 label.setText("透明度：" + value + "%");
                 if (fromUser) {
                     patch(a, item[0], "alpha", String.valueOf(value));
+                    fold.summary.setText(customItemSummary(a, item));
                 }
             }
         });
-        card.addView(bar);
+        fold.body.addView(bar);
     }
 
     private static void patch(Activity a, String match, String field, String value) {

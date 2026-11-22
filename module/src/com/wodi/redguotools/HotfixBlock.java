@@ -1,6 +1,7 @@
 package com.wodi.redguotools;
 
 import android.app.Application;
+import android.content.Context;
 
 import java.lang.reflect.Method;
 
@@ -64,9 +65,16 @@ final class HotfixBlock {
         try {
             Method doInit = cls.getDeclaredMethod("doInit", Application.class);
             doInit.setAccessible(true);
-            mod.hook(doInit).setId("rgNoHotfixInit")
+            mod.hook(doInit)
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(chain -> {
+                        // 开关必须在 intercept 里读：配置随时可能被面板改动，
+                        // 而 hook 只在 onPackageReady 装一次。原来这里无条件短路，
+                        // 导致面板上「禁用热更新」是个死开关（关掉也照样拦）。
+                        // 判据与 AdBlock.gateOn() 一致：拿不到 Context 时按「拦」处理。
+                        if (!gateOn()) {
+                            return chain.proceed();
+                        }
                         if (!sBlockedOnce) {
                             sBlockedOnce = true;
                             UiController.logFile("hotfix: blocked doInit (Reparo not initialized)");
@@ -80,9 +88,12 @@ final class HotfixBlock {
         try {
             Method load = cls.getDeclaredMethod("loadRemotePatch");
             load.setAccessible(true);
-            mod.hook(load).setId("rgNoHotfixLoad")
+            mod.hook(load)
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(chain -> {
+                        if (!gateOn()) {
+                            return chain.proceed();
+                        }
                         UiController.logFile("hotfix: blocked loadRemotePatch");
                         return null;
                     });
@@ -92,5 +103,20 @@ final class HotfixBlock {
         }
         sInit = true;
         sStatus = n == 2 ? "ok" : ("partial (" + n + "/2)");
+    }
+
+    /**
+     * 是否屏蔽热更新。
+     *
+     * <p>取不到 Context 时按「拦」处理 —— 这是本功能的默认立场（面板默认值也是开），
+     * 且 {@code doInit} 阶段 Context 通常已由 {@code callApplicationOnCreate}
+     * 写入 UiController，拿不到属于异常路径，宁可保守。
+     *
+     * <p>改动后需重启红果才生效：Reparo 的初始化发生在启动最早期，
+     * 已经执行过的 {@code doInit} 不会因为开关变了而重跑。
+     */
+    private static boolean gateOn() {
+        Context c = UiController.appCtx();
+        return c == null || Config.blockHotfix(c);
     }
 }

@@ -3,8 +3,16 @@
     package="com.wodi.redguotools">
 
     <!-- Android 11+ 包可见性：允许查询红果的版本号 -->
+    <!--
+        Android 11+ 包可见性：不在这里声明的包，getPackageInfo 会直接抛
+        NameNotFoundException（表现就是主页把已安装的宿主显示成「未安装」）。
+        四个适配/待适配的宿主都列上。
+    -->
     <queries>
         <package android:name="com.phoenix.read" />
+        <package android:name="com.phoenix.read.oversea.gp" />
+        <package android:name="com.dragon.read" />
+        <package android:name="com.xs.fm" />
     </queries>
 
     <application

@@ -53,3 +53,10 @@ _userlog*
 _wd.xml
 _wd2.xml
 module/kt/
+
+# ---- 临时产物统一区（根目录禁止散落，见 AGENTS.md）----
+_tmp/
+_rv*
+
+# ---- IDE / 会话数据 ----
+.zcode/

@@ -1,8 +1,9 @@
-# ReadGuo · 红果免费短剧界面工具模块
+# ReadGuo · 红果 / 番茄界面工具模块
 
-> 作者：酷安@残話 · 模块内置完整使用说明与免责声明 · [GitHub](https://github.com/staciepomar-spec/RedGuo)
+> 作者：残話/紫米米粥 · 模块内置完整使用说明与免责声明 · [GitHub](https://github.com/staciepomar-spec/RedGuo) · [Gitee](https://gitee.com/allray/RedGuo)
 
-一个面向 **红果免费短剧（com.phoenix.read）** 的 LSPosed/Xposed 界面增强模块。
+一个面向 **红果免费短剧（com.phoenix.read）**、**番茄免费小说（com.dragon.read）**、
+**番茄畅听（com.xs.fm）** 的 LSPosed/Xposed 界面增强模块。
 不碰任何付费与版权机制，只做界面显示层面的个性化。
 
 > ⚠️ 本项目仅供学习交流与个人技术研究使用，请勿用于商业用途。详见文末免责声明。
@@ -14,10 +15,11 @@
 | 功能 | 说明 |
 |------|------|
 | 隐藏系统状态栏 | 独立开关，默认开启 |
-| 状态栏底色 | 跟随背景 / 纯黑 / 纯白 三选一 |
 
-> 「点击状态栏区域显示时间/电量数字」子功能**已移除** ——
-> 现在状态栏隐藏后，顶部只保留一条静态底色横条，不承载任何文字与交互。
+> 只隐藏系统状态栏，**不再自绘任何底色**（v3.10 移除「状态栏底色」）。
+> 藏掉之后顶部露出的是宿主自己的界面 —— 红果首页/播放页本来就是深色底，
+> 看到的就是它们本来的样子；模块不再往里塞一条横条，也就没有「颜色不对」这回事。
+> 「点击状态栏区域显示时间/电量数字」子功能更早已移除。
 
 ### 二、界面透明度（视频除外）
 
@@ -150,9 +152,46 @@
 | 默认最高画质 | `TTVideoEngineImpl.configResolution(Resolution)` → 替换为 `ExtremelyHigh` |
 | 自定义倍速 1.0~2.0x 无级（0.1 步进） | `PlaybackParams.setSpeed(F)` |
 | 长按边缘临时倍速 1.0~2.0x（默认 2.0x） | 同上，按调用栈识别长按通路后改写 |
+| **强制显示弹幕**（v3.07 新增） | 写宿主 SP `video_danmaku_switch_sp`（见下） |
 | **定时关闭到点直接熄屏** | `yr4.l.<init>`（宿主 `ScheduledStopPlayController` 的归零事件） |
 
 改动对**下一个起播的视频**生效（自动连播即可见效）。
+
+#### 强制显示弹幕（v3.07）
+
+**问题**：有反馈「弹幕在一些设备上不生效」—— 同一版本、同一操作，有的机器出弹幕，
+有的怎么点都不出。
+
+**根因**（7.3.9.32 反编译确证）：宿主判断「要不要显示弹幕」的方法是
+`com.dragon.read.video.danmaku.i#h()Z`（日志串 `isDanmakuEnableByUser: ...`），
+它的取值是**三级回落**：
+
+```
+SP video_danmaku_switch_sp / key_enable_danmaku_by_user   （用户自己拨过的开关）
+  ↓ 该键不存在
+libra 配置 VideoDanmakuLibraConfig.defaultSwitchOpen      （云控默认值①）
+  ↓ 也没有
+服务端下发的 default_switch                                （云控默认值②）
+```
+
+默认值①②是**按设备 / 按账号下发**的，并不统一。用户从没手动拨过弹幕开关时，
+走的就是这两条云控默认值 —— 有的设备下发的是「关」，于是弹幕永远不出来，
+而且界面上看不出任何异常。
+
+**做法**：不去 hook 那个方法，而是**直接写宿主自己的 SharedPreferences**，
+把 `key_enable_danmaku_by_user`（boolean）与 `key_enable_danmaku`（AB 值）都置为开启，
+两条回落路径就都用不上了。
+
+> **为什么不 hook `i#h()`**：那个类名 `i` 是混淆短名，每换一个版本就换成别的字母，
+> hook 它等于每次发版重找一遍 —— 本模块其它地方已经吃过这个亏。
+> 而 `KvCacheMgr`（`com.dragon.read.local.KvCacheMgr`，未混淆）与 SP 文件名
+> `video_danmaku_switch_sp`（落盘键名，改名等于清空用户设置，宿主自己不会改）
+> 都是**跨版本稳定的标识**。模块跑在宿主进程里，用宿主自己的
+> `KvCacheMgr.getPrivate()` 取到**同一个** SP 实例写进去，
+> 格式 / 加密 / 缓存全部由宿主自己保证。
+
+**关闭时会还原**：强制打开前先把两个键的存在性与原值记下来，关掉开关时按记录写回
+（原本不存在的键直接删掉），把宿主的弹幕设置原样交还。
 
 **倍速上限 2.0x（v2.80 修正）**：常规倍速与长按倍速**是同一条通路**——
 两者最终都汇到 `PlaybackParams.setSpeed` → `TTPlayer._setFloatValue(0x3C)` 的 JNI
@@ -395,44 +434,57 @@ hook 这一处即可全拦，因此不需要维护「拦截名单」。另外四
 
 `/sdcard/Android/data/com.phoenix.read/files/` 下：
 
-- `rgtools_log.txt` —— 功能命中记录
-- `rgtools_tree.txt` —— 进页面 1.8 秒后的视图树快照
+- `rgtools_log.txt` —— 功能命中记录（红果侧：`/sdcard/Android/data/com.phoenix.read/files/`）
+- `rgtools_tree.txt` —— 进页面 1.8 秒后的视图树快照（同上目录）
+- `rgtools_crash.txt` —— **闪退堆栈（v3.07 新增）**
+  宿主侧在 `com.phoenix.read` 目录，**模块 App 侧在 `com.wodi.redguotools` 目录**
 
 面板内亦有「输出视图树日志」按钮。
 
-## 模块 App 内置设置（不打开红果也能配）
+> **反馈闪退时请一并带上 `rgtools_crash.txt`**（两边都看一下）。
+> 之前收到过「App 设置页点开关就闪退」的反馈却拿不到任何日志 —— HyperOS 上 logcat 被屏蔽，
+> 用户也不会去导崩溃记录，少了堆栈就只能猜。
+> v3.07 起宿主进程与模块 App 进程都挂了 `UncaughtExceptionHandler`：
+> **先把完整堆栈写进 `rgtools_crash.txt`，再原样交还原 handler**
+> （该崩还是崩，模块绝不吞异常 —— 吞掉只会把崩溃变成更难查的诡异行为）。
+> 每条记录都带环境快照：框架名 / 框架版本 / Xposed API 版本 / 宿主包名与版本。
+>
+> 同时所有开关回调都包了护栏：某个开关出错只会让**那一项**失效并留一条记录，
+> 不会再把整个 App 带崩。
 
-模块 App 的「设置」页收录了全部开关 / 滑杆 / 三选一项，改完立即生效（红果下次启动读回）。
+## 在哪改设置
 
-### 配置怎么跨进程送过去的
+**只有一处：红果里的模块面板。**
 
-模块 App 与红果是**两个 uid、两个私有目录**，两头都堵死：
+- 播放页：点右上角「⋮」→ 播放设置 → 最下方「ReadGuo 设置」
+- 任意页面：长按底部「首页」标签直接唤出
 
-- 模块 App 写不进 `/data/data/com.phoenix.read/shared_prefs/`（无权限）；
-- 红果也读不到模块的 —— Android 11+ 包可见性让它连模块的存在都看不见，
-  ContentProvider / bindService / 广播 / Activity 四条显式通道全被静默拦掉
-  （v2.x 实测确认，见「定时关闭 → 直接关屏」）。
+模块 App 现在只有「主页 / 功能 / 关于」三页，只负责说明状态与版本。
 
-唯一**不需要 root、也不需要宿主配合**的通道是**公共存储**：
+### 为什么模块 App 里的设置页被删掉了（v3.08）
 
-```
-模块 App  ──写入──▶  /storage/emulated/0/Documents/RGTools/rg_cfg.json
-红果      ──读取──◀  同一文件（Config.init 时一次）
-```
+它原先收录了全部开关，改完通过一个公共目录下的 JSON 送到红果。
+**那条通道在 Android 11+ 上根本不成立**，v3.08 真机实测确认：
 
-- 模块 App 用 `MediaStore.Files + RELATIVE_PATH` 写入，**不需要任何存储权限**
-  （v3.03 导出日志已验证过这条路）；同名文件先查后覆盖，不会堆出 `rg_cfg (1).json`。
-- 红果声明了 `MANAGE_EXTERNAL_STORAGE`（短剧要存视频，用户本来就会授权），
-  可以直接 `File` 读，读不到再退回 MediaStore 查询。
-- 配置按 SharedPreferences 的三种类型分桶存 JSON（`b` / `i` / `s`），
-  导入时按桶还原，`boolean / int / String` 的类型不会在往返中丢失。
+| 路径 | 结果 |
+|------|------|
+| `File` 直读 `/storage/emulated/0/Documents/RGTools/rg_cfg.json` | ❌ 文件是模块 App 用 MediaStore 建的，属主是它的 uid、权限 `770`，红果属于 others → `File.exists()` 恒 `false` |
+| MediaStore 兜底（`MediaStore.Files` 查询 → `openInputStream`） | ❌ 行确实查得到（`_id=3642`），但红果 `targetSdk 35` 且**没有「所有文件访问」授权**（`appops` 显示 `MANAGE_EXTERNAL_STORAGE: default`），打不开别的 App 写的非媒体文件 |
 
-代价是**改完要重启一次红果**（模块 App 里点「重启红果」即可），换来的是零权限零 root。
+宿主虽在清单里声明了 `MANAGE_EXTERNAL_STORAGE`，但那是需要用户手动授予的
+「所有文件访问」特殊权限，**我们无权代授**。而除了文件之外的四条通道
+（ContentProvider / bindService / 广播 / Activity）又都被 Android 11+ 的包可见性挡死
+（v2.x 早已实测确认，宿主清单里没有指向本模块的 `<queries>`）。
 
-### 留在红果面板里的项
+也就是说：**这个入口从一开始就是"改了没反应"，而且没有任何报错。**
+一个静默失效的设置页比没有更糟 —— 用户会以为功能坏了。
+v3.08 起删掉它与背后的 `CfgBridge`，设置一律在红果内面板里改，
+那是唯一真正连通的通道（改完立即生效，不需要重启红果）。
 
-自定义隐藏清单、底部标签栏勾选、逐槽位透明度这三类仍只能在红果内设置 ——
-它们要实时扫描宿主的视图树，本进程没有那个能力。
+> 顺带一提：如果哪天要恢复跨进程配置，唯一可靠的官方通道是
+> **libxposed 的 remote preferences**（`XposedInterface.getRemotePreferences`），
+> 由框架代为存储与分发，不受文件权限与包可见性影响。
+> 但前提是「有人需要从模块 App 里改配置」，而现在没有了，所以没做。
 
 ## 安装
 
@@ -461,9 +513,11 @@ module/
 │   ├── RGModule.java           # Xposed 入口，所有 hook 注册
 │   ├── UiController.java       # 界面控制 / 规则引擎 / 清屏空闲收起
 │   ├── PlayerTweaks.java       # 播放器：最高画质 / 自定义倍速
+│   ├── Danmaku.java            # 强制显示弹幕（写宿主 video_danmaku_switch_sp）
+│   ├── CrashGuard.java         # 崩溃取证（UncaughtExceptionHandler → rgtools_crash.txt）
 │   ├── SleepTimer.java         # 定时关闭到点直接熄屏（root 注入电源键）
 │   ├── Config.java             # 配置读写（槽位表 / 清单）
-│   ├── SettingsPanel.java      # 红果内设置面板
+│   ├── SettingsPanel.java      # 红果内设置面板（唯一的配置入口）
 │   ├── SheetEntry.java         # 播放设置弹层注入入口
 │   ├── Names.java              # 规则 → 图标 + 中文名
 │   ├── Theme.java              # 配色与控件工厂
@@ -484,6 +538,121 @@ module/
 其它版本理论上可用（视图类名匹配做了多版本兼容），未逐一测试。
 
 ## 更新日志
+
+### v3.12 (versionCode 97) — 适配红果 7.4.2.32
+
+**修复 · 首页标题透明度拉不动**
+
+宿主 7.4 把首页卡片的剧名换成了通用的 `ShortSeriesScaleTextView`
+（实测首页整棵树 128 个实例 —— 点赞数、按钮文字、热度值全是它），资源 id 也从 `g41`
+换成了 `d4`。槽位里原来那三条规则（`ShortSeriesInfoHeaderView` / `id:g41` /
+`ShortSeriesExtendTextView`）因此全部落空，只剩 `ShortSeriesInfoHeaderView` 这个
+0 高度的占位行还命中 —— 表现就是「标题透明度拉到 39% 毫无变化」。
+
+改为**布局结构定位**：剧名永远紧贴在那排类型标签（`PriorityTagLayout`，类名未混淆）
+的正上方。以标签行为锚点，向上找「纵向不超过一个标题行高、宽度不小于屏宽 1/8、
+并且不是 `@作者名` / 热评 / 全屏观看这些噪声」的可见文本节点。
+实测两张卡片的剧名都被正确写入 `alpha=0.16`（0.42 × 0.39），作者名没有被误伤。
+
+**修复 · 部分机型长按首页唤不出面板**（入口三级定位）
+
+原来只认宿主容器类名 `BottomTabBarLayout` 的第一个格子。换成别的容器
+（或格子被 ViewStub 包一层）就整个失效 —— 而面板是**唯一**的配置入口，失效等于模块不可用。
+现在依次尝试：① 容器类名 → ② 按文案「首页」找那一格并向上取可点击祖先
+（文案不随版本变）→ ③ 底部左侧 1/5 区域（仅当同屏还能找到「剧场 / 我的」，
+确认这确实是首页底部栏；二级播放页同位置是拖进度条，不放开）。
+
+**已知 · 播放设置弹层（长按视频中央）没有剧名标题**
+
+红果 7.4 把这个弹层整体重写成了 **Compose**（`ComposeView` 下没有一个子 View，
+`uiautomator` 里看到的 `TextView` 只是无障碍虚拟节点）。顶上原本那行「剧名 / 第N集」
+是宿主自己删掉的，不是本模块隐藏的 —— 模块对 Activity 的 DecorView 做的任何操作
+都碰不到它。同因，模块原先注入弹层的「⚙ ReadGuo 设置」行也失效了（`SheetEntry`
+按文案找行、往竖排 `LinearLayout` 里插，Compose 树里两者都不存在）。
+面板入口请用「长按底部首页」或「长按顶部中央」。
+
+### v3.08 (versionCode 93)
+
+**移除 · 模块 App 内的「设置」页**（模块 App 现为 主页 / 功能 / 关于 三页）
+
+它原先靠一个公共目录下的 JSON 把配置送到红果，**那条通道在 Android 11+ 上根本不成立**：
+文件属主是模块 App 的 uid、权限 `770`，红果 `File.exists()` 恒 false；
+MediaStore 兜底也打不开（红果 `targetSdk 35` 且未授予「所有文件访问」，
+`appops` 实测为 `MANAGE_EXTERNAL_STORAGE: default`）。其余四条通道
+（ContentProvider / bindService / 广播 / Activity）早被包可见性挡死。
+
+即：这个入口**一直**是「改了没反应」且毫无报错。静默失效的设置页比没有更糟，
+删掉它（`ModuleSettings.java`）与背后的 `CfgBridge.java`。设置一律在红果内面板里改（见「在哪改设置」），
+那条路改完立即生效，本来就不需要重启红果。
+
+**新增** · 模块 App 主页加了「在哪改设置」指引（两条入口路径）。
+主页的「重启红果」按钮保留。
+
+**修复 · 自定义清单里两个「顶部导航栏」不再同名**（`Names.describe`）
+
+`SlidingTabLayout` 有「父级 / 自身」两种藏法，藏的东西完全不同：
+
+| 规则 | 实际效果 | 现在显示为 |
+|------|---------|-----------|
+| `cls:com.dragon.read.widget.tab.SlidingTabLayout` | 只藏「漫剧 / 推荐」标签条，☰ 与搜索留在外层 | **顶部标签条** |
+| `pcls:SlidingTabLayout` | 整条一起藏（组件显隐的「顶部导航栏（首页）」用的就是它） | **顶部导航栏（含菜单/搜索）** |
+
+之前两者都叫「顶部导航栏」，用户勾了 `cls:` 那条会以为藏的是同一样东西，
+结果只少了标签条、☰ 和搜索孤零零留着 —— 表现为「界面错位」，很容易误判成出了 bug。
+（实测踩过：`ovl_list` 里混进 `cls:` 那条，取消勾选即恢复。）
+
+### v3.07 (versionCode 92)
+
+**新增 · 强制显示弹幕**（反馈：弹幕在一些设备上不生效）
+
+宿主判断「要不要显示弹幕」的方法 `video/danmaku/i#h()Z` 是**三级回落**：用户开关
+→ 云控默认值①→ 云控默认值②。后两级按设备/账号下发且并不统一，用户没手动拨过开关时
+走的正是它们，于是有的机器出弹幕、有的怎么点都不出。
+
+模块不去 hook 那个混淆方法，而是直接写宿主自己的 SP `video_danmaku_switch_sp`
+（`KvCacheMgr` 与 SP 文件名都是跨版本稳定的标识），把 `key_enable_danmaku_by_user`
+与 `key_enable_danmaku` 都置为开启，两条回落路径都用不上。关闭开关时按记录还原原值。
+详见「七、播放器 → 强制显示弹幕」。
+
+**修复 · 开关闪退现在能拿到日志了**（反馈：App 设置页内点开关就闪退）
+
+**根因（确定性复现，与框架/设备无关）**：`MiUi.MiSwitch.onTouchEvent()` 里无条件
+`OnToggle l = (OnToggle) getTag();`，而 `ModuleSettings.addSwitch()` 往 tag 里塞的是
+`It[]` —— 于是**每点一次任意开关就抛一次 `ClassCastException`**
+（`ModuleSettings$It[] cannot be cast to MiUi$OnToggle`）。
+
+> 为什么偏偏是这里：`MainActivity` 用的 `sw.setTag(l)` 传的正是 `OnToggle`（写法正确），
+> 只有 `ModuleSettings` 图省事改用了 `setTag(new It[]{it})` + `setOnClickListener`。
+> 而 `onTouchEvent` 里 `performClick()` **先于**取 tag 执行 ——
+> 所以配置其实已经写完并导出去了，紧接着才崩，表现就是「开关生效了但 App 闪退」。
+
+修复：
+- `ModuleSettings.addSwitch()` 改回 `OnToggle` 契约（回调只走 OnToggle 一条路，
+  同时挂 `OnClickListener` 会被调两次）；
+- `MiSwitch.onTouchEvent()` 改用 `instanceof` 判定 —— 就算以后再有人塞错 tag，
+  也只是记一条日志，不会把设置页点崩。
+
+其余取证与护栏（原先只覆盖红果内面板，现已补上 App 侧）：
+
+- 新增 `CrashGuard`：宿主进程挂 `UncaughtExceptionHandler`，**先写堆栈再交给原 handler**
+  （宿主照常崩溃，模块绝不吞异常），落到 `rgtools_crash.txt`，每条带框架名/版本/API 版本快照。
+  **模块 App 进程也装一份**（`MainActivity.onCreate`），落到
+  `/sdcard/Android/data/com.wodi.redguotools/files/rgtools_crash.txt`。
+- 红果面板的全部开关回调加护栏；App 设置页的开关回调也加了 try-catch + toast。
+- `rebuild()` / `ensureOn()` / `show()` 补 Activity 存活判断与 try-catch ——
+  post 回来时页面可能已被宿主换掉（DPI 重建、暗色换肤、切剧），
+  对着已销毁的 Activity `new Dialog().show()` 会抛 `BadTokenException`。
+
+**变更 · LSPosed 最低 API 降到 100**
+
+`module.prop` 由 `minApiVersion=102 / targetApiVersion=102` 改为 `100 / 101`，
+让更多框架能装上。
+
+> ⚠️ **随之必须移除全部 26 处 `HookBuilder.setId()`**（已全部删除）。
+> `setId` 标注 `@SinceApi(API_102)`，**API 100/101 的 `HookBuilder` 接口里根本没有这个方法** ——
+> 只改 `module.prop` 而留着这些调用，在 API 101 框架上会抛 `NoSuchMethodError`，
+> 结果是**每一个 hook 都注册失败、模块整体静默失效**。
+> 本模块 `autoHotReload=false`，`setId` 只服务于热重载的同名 hook 原子替换，用不到，删掉无损失。
 
 ### v3.06 (versionCode 91)
 

@@ -9,12 +9,14 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -50,7 +52,7 @@ import java.util.Locale;
 public class MainActivity extends Activity {
 
     private static final String TAG = RGModule.TAG;
-    private static final String AUTHOR = "酷安@残話";
+    private static final String AUTHOR = "残話/紫米米粥";
     private static final String GITHUB = "github.com/staciepomar-spec/RedGuo";
 
     /**
@@ -108,6 +110,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 模块 App 自己也会崩（设置页开关、root 调用…），同样要留下堆栈，
+        // 否则「App 内闪退」依旧查不到。装在 super 之后、任何界面构建之前。
+        CrashGuard.install(getApplicationContext());
         p = MiUi.pal(this);
         lightSystemBars();
 
@@ -120,7 +125,7 @@ public class MainActivity extends Activity {
         FrameLayout content = new FrameLayout(this);
         root.addView(content, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        mPages = new View[]{homePage(), featurePage(), settingsPage(), aboutPage()};
+        mPages = new View[]{homePage(), featurePage(), aboutPage()};
         for (int i = 0; i < mPages.length; i++) {
             content.addView(mPages[i], new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -253,8 +258,12 @@ public class MainActivity extends Activity {
         bar.setPadding(0, dp(6), 0, dp(4));
         wrap.addView(bar, blp);
 
-        String[] names = {"主页", "功能", "设置", "关于"};
-        int[] icons = {MiUi.I_HOME, MiUi.I_SLIDERS, MiUi.I_GEAR, MiUi.I_INFO};
+        // v3.07 起只保留三页：所有设置都在红果内的模块面板里改。
+        // 模块 App 原先也有一个「设置」页，但它要把配置送到红果只能靠公共目录下的
+        // 一个文件，而那条通道在 Android 11+ 已经死了（详见 CfgBridge 被移除的说明），
+        // 留着只会让人以为改了就生效 —— 一个静默失效的入口比没有更糟。
+        String[] names = {"主页", "功能", "关于"};
+        int[] icons = {MiUi.I_HOME, MiUi.I_SLIDERS, MiUi.I_INFO};
         mTabs = new View[names.length];
         for (int i = 0; i < names.length; i++) {
             final int idx = i;
@@ -269,12 +278,13 @@ public class MainActivity extends Activity {
             LinearLayout item = new LinearLayout(this);
             item.setOrientation(LinearLayout.VERTICAL);
             item.setGravity(Gravity.CENTER);
-            item.setPadding(0, dp(2), 0, dp(2));
+            // 左右留出 padding，选中时这块内缩的矩形才会形成 iOS 那种胶囊
+            item.setPadding(dp(16), dp(3), dp(16), dp(3));
 
             MiUi.Icon ic = new MiUi.Icon(this);
             ic.setType(icons[i]);
             ic.setColor(p.sub);
-            item.addView(ic, new LinearLayout.LayoutParams(dp(24), dp(24)));
+            item.addView(ic, new LinearLayout.LayoutParams(dp(25), dp(25)));
 
             TextView label = new TextView(this);
             label.setText(names[i]);
@@ -282,7 +292,7 @@ public class MainActivity extends Activity {
             label.setTextColor(p.sub);
             label.setGravity(Gravity.CENTER);
             label.setIncludeFontPadding(false);
-            label.setPadding(0, dp(3), 0, 0);
+            label.setPadding(0, dp(2), 0, 0);
             item.addView(label);
 
             cell.addView(item, new FrameLayout.LayoutParams(
@@ -313,21 +323,192 @@ public class MainActivity extends Activity {
             boolean on = i == idx;
             ic.setColor(on ? p.blue : p.sub);
             label.setTextColor(on ? p.blue : p.sub);
+            // iOS 18 那种选中胶囊：淡蓝底 + 大圆角，只包住图标和文字这一小块，
+            // 不是把整格铺满 —— 铺满会变成 Android 老式的「选中变底色」。
+            if (on) {
+                inner.setBackground(MiUi.round(0x1F007AFF, 14, this));
+            } else {
+                inner.setBackground(null);
+            }
         }
     }
 
     /* ==================== 主页 ==================== */
 
+    /**
+     * 三个适配应用：包名、显示名、面板入口说明、图标。
+     *
+     * <p>番茄畅听还没做，但位置先占上 —— 主页和功能页都按这张表渲染，
+     * 以后接畅听时只要把它的规则补上、把 {@link #suported(String)} 改成 true 即可，
+     * 不用再动 UI。
+     */
+    private static final String[][] APPS = {
+            {"com.phoenix.read", "红果免费短剧", "长按底部「首页」标签唤出面板"},
+            {"com.dragon.read", "番茄免费小说", "长按底部「书城」标签唤出面板"},
+            {"com.xs.fm", "番茄畅听", "长按底部「首页」或顶部中央唤出面板"},
+    };
+
+    /** 三个宿主都已接入实际功能。 */
+    private static boolean suported(String pkg) {
+        return true;
+    }
+
+    /** 已安装则返回 versionName，否则 null。 */
+    private String installedVersion(String pkg) {
+        try {
+            return getPackageManager().getPackageInfo(pkg, 0).versionName;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 一个应用在主页里的副标题：版本 + 状态。 */
+    private String appSub(String pkg) {
+        String ver = installedVersion(pkg);
+        if (ver == null) {
+            return "未安装";
+        }
+        return "v" + ver + (suported(pkg) ? " · 已适配" : " · 暂未支持");
+    }
+
     private View homePage() {
         LinearLayout col = page("主页", MiUi.I_REFRESH, new Runnable() {
             @Override
             public void run() {
-                restartHost();
+                showRestartMenu();
             }
         });
         LinearLayout body = (LinearLayout) holder.get(col);
         buildHome(body);
         return col;
+    }
+
+    /**
+     * 右上角按钮：弹菜单选一个应用重启。
+     *
+     * <p>原来这里是无条件重启红果。现在适配了三个应用，各家的面板入口和生效方式
+     * 都不一样，需要哪个重启哪个，所以先让用户选。
+     */
+    /**
+     * 右上角按钮：底部弹出 ActionSheet，选一个应用重启。
+     *
+     * <p>原来是系统的 AlertDialog（居中、直角、白底黑字），跟整页 iOS 风格完全不搭。
+     * 改成底部弹层：圆角卡 + 居中蓝色选项 + 独立的「取消」块，左右各留 10dp。
+     */
+    private void showRestartMenu() {
+        final java.util.List<String> pkgs = new java.util.ArrayList<>();
+        final java.util.List<String> labels = new java.util.ArrayList<>();
+        for (String[] e : APPS) {
+            if (installedVersion(e[0]) != null) {
+                pkgs.add(e[0]);
+                labels.add(e[1]);
+            }
+        }
+        if (pkgs.isEmpty()) {
+            android.widget.Toast.makeText(this, "没有已安装的适配应用",
+                    android.widget.Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        final Dialog d = new Dialog(this);
+        d.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(10), 0, dp(10), dp(10));
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(MiUi.round(p.card, 16, this));
+
+        TextView title = new TextView(this);
+        title.setText("重启哪个应用");
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        title.setTextColor(p.sub);
+        title.setGravity(Gravity.CENTER);
+        title.setPadding(0, dp(14), 0, dp(12));
+        card.addView(title);
+
+        for (int i = 0; i < labels.size(); i++) {
+            final int idx = i;
+            MiUi.divider(this, p, card);
+            TextView row = new TextView(this);
+            row.setText(labels.get(i));
+            row.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+            row.setTextColor(p.blue);
+            row.setGravity(Gravity.CENTER);
+            row.setPadding(0, dp(16), 0, dp(16));
+            row.setBackground(MiUi.pressable(this, p, 0));
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    d.dismiss();
+                    restartApp(MainActivity.this, pkgs.get(idx), labels.get(idx));
+                }
+            });
+            card.addView(row);
+        }
+        root.addView(card, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView cancel = new TextView(this);
+        cancel.setText("取消");
+        cancel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        cancel.setTextColor(p.blue);
+        cancel.setGravity(Gravity.CENTER);
+        cancel.setPadding(0, dp(16), 0, dp(16));
+        cancel.setBackground(MiUi.pressable(this, p, 16));
+        cancel.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                d.dismiss();
+            }
+        });
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clp.topMargin = dp(8);
+        root.addView(cancel, clp);
+
+        d.setContentView(root);
+        if (d.getWindow() != null) {
+            d.getWindow().setBackgroundDrawable(
+                    new android.graphics.drawable.ColorDrawable(0));
+            d.getWindow().setGravity(Gravity.BOTTOM);
+            d.getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+        d.show();
+    }
+
+    /**
+     * 强制停止并重新拉起指定应用（需 root；无 root 时只强停）。
+     *
+     * <p>先 force-stop 再 monkey 拉起，和红果那套重启流程一致 ——
+     * Xposed 的 hook 是进程启动时装上的，不重启进程改了配置也不生效。
+     */
+    static void restartApp(final Activity a, final String pkg, final String label) {
+        if (a == null) {
+            return;
+        }
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                RootShell.run("am force-stop " + pkg);
+                try {
+                    Thread.sleep(400);
+                } catch (InterruptedException ignored) {
+                }
+                RootShell.run("monkey -p " + pkg
+                        + " -c android.intent.category.LAUNCHER 1");
+                a.runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        android.widget.Toast.makeText(a, "已重启" + label,
+                                android.widget.Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }
+        }, "rg-restart-app").start();
     }
 
     /**
@@ -367,11 +548,11 @@ public class MainActivity extends Activity {
                 }
                 final String msg;
                 if (n == 0) {
-                    msg = "未找到已安装的红果";
+                    msg = "未找到已安装的应用";
                 } else {
                     RootShell.run("monkey -p " + primary
                             + " -c android.intent.category.LAUNCHER 1");
-                    msg = "已重启红果（" + primary + "）";
+                    msg = "已重启（" + primary + "）";
                 }
                 a.runOnUiThread(new Runnable() {
                     @Override
@@ -384,46 +565,32 @@ public class MainActivity extends Activity {
         }, "rg-restart").start();
     }
 
+    /**
+     * 主页只列「适配了哪些应用」——用户明确要求别的都不放。
+     *
+     * <p>原来这一页有状态卡、在哪改设置、设备与版本、捐赠入口。改版后：
+     * 应用清单提到第一位（这是用户唯一关心的信息），
+     * 设置入口挪到功能页每个应用的详情里，设备信息整个去掉（对使用者没价值）。
+     */
     private void buildHome(LinearLayout body) {
-        /* ---------- 状态（按证据显示，不做断言） ---------- */
-        LinearLayout st = MiUi.group(this, p, body, "状态");
-        ModuleState.Result detected = ModuleState.detect(this);
-        int state = detected.state;
-        String detail = detected.detail;
-        String title;
-        String note;
-        int icon;
-        switch (state) {
-            case ModuleState.RUNNING:
-                title = "模块正在红果中运行";
-                note = detail;
-                icon = MiUi.I_RING_CHECK;
-                break;
-            case ModuleState.IDLE:
-                title = "上次在红果里运行过";
-                note = detail + "。打开一次红果即可恢复。";
-                icon = MiUi.I_RING_CHECK;
-                break;
-            case ModuleState.NONE:
-                title = "没有运行记录";
-                note = "红果里找不到本模块的日志。通常是没在 LSPosed 中启用本模块、"
-                        + "或作用域没勾选红果免费短剧。";
-                icon = MiUi.I_INFO;
-                break;
-            default:
-                title = "无法检测运行状态";
-                note = "本机没有 root，读不到红果的运行日志，所以这里不做断言。"
-                        + "请在 LSPosed 中确认模块已启用、且作用域勾选了红果免费短剧。";
-                icon = MiUi.I_INFO;
-                break;
+        LinearLayout apps = MiUi.group(this, p, body, "适配应用");
+        for (int i = 0; i < APPS.length; i++) {
+            if (i > 0) {
+                MiUi.divider(this, p, apps);
+            }
+            String pkg = APPS[i][0];
+            MiUi.row(this, p, apps, APPS[i][1], appSub(pkg),
+                    installedVersion(pkg) == null ? MiUi.I_INFO : MiUi.I_APPS);
         }
-        LinearLayout line = MiUi.row(this, p, st, title, null, icon);
-        line.addView(MiUi.value(this, p, "v" + versionName()));
-        TextView stateNote = MiUi.body(this, p, note);
-        stateNote.setPadding(MiUi.dp(this, 16), MiUi.dp(this, 2), MiUi.dp(this, 16), MiUi.dp(this, 14));
-        st.addView(stateNote);
 
-        /* ---------- 设备 ---------- */
+        TextView hint = MiUi.footer(this, p,
+                "在 LSPosed 中启用本模块，并把上面用到的应用勾进作用域。"
+                        + "改完点右上角按钮重启对应应用，hook 才会重新挂上。");
+        hint.setPadding(MiUi.dp(this, 4), MiUi.dp(this, 10),
+                MiUi.dp(this, 4), MiUi.dp(this, 4));
+        body.addView(hint);
+
+        /* ---------- 设备与版本 ---------- */
         LinearLayout dev = MiUi.group(this, p, body, "设备与版本");
         valueRow(dev, "设备", Build.MODEL);
         MiUi.divider(this, p, dev);
@@ -432,8 +599,6 @@ public class MainActivity extends Activity {
         valueRow(dev, "系统", hyperOsVersion());
         MiUi.divider(this, p, dev);
         valueRow(dev, "Android", Build.VERSION.RELEASE);
-        MiUi.divider(this, p, dev);
-        valueRow(dev, "红果版本", hostVersion());
         MiUi.divider(this, p, dev);
         valueRow(dev, "模块版本", versionName() + " (" + versionCode() + ")");
 
@@ -555,59 +720,375 @@ public class MainActivity extends Activity {
         LinearLayout col = page("功能", -1, null);
         LinearLayout body = (LinearLayout) holder.get(col);
 
-        featureCard(body, "界面显示",
-                "状态栏：隐藏系统状态栏，底色可选 跟随背景 / 纯黑 / 纯白",
-                "组件显隐：12 个常用组件（顶栏 / 右侧互动 / 底部条 / 标题 / 热评 / 进度条…）逐项开关",
-                "自定义隐藏清单：「扫描当前页面」自动列出，或手动加规则（cls: / @文案 / text: / id:）",
-                "底部标签栏：按标签文字勾选隐藏，剩余标签自动摊满整行",
-                "底部导航栏：软件内全程隐藏小白条，退出软件才恢复",
-                "界面透明度：首页/二级页上视频以外的所有浮层统一调透明，设置持久保存，只有重置才还原");
+        LinearLayout list = MiUi.group(this, p, body, "按应用查看");
+        for (int i = 0; i < APPS.length; i++) {
+            if (i > 0) {
+                MiUi.divider(this, p, list);
+            }
+            final int idx = i;
+            LinearLayout row = MiUi.row(this, p, list, APPS[i][1], APPS[i][2], MiUi.I_APPS);
+            row.addView(MiUi.chevron(this, p));
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    showAppDetail(idx);
+                }
+            });
+        }
+        TextView hint = MiUi.footer(this, p, "点任意一项查看该应用的具体功能与面板入口。");
+        hint.setPadding(MiUi.dp(this, 4), MiUi.dp(this, 10),
+                MiUi.dp(this, 4), MiUi.dp(this, 4));
+        body.addView(hint);
 
-        featureCard(body, "播放器",
-                "默认最高画质：起播自动选最高可用档",
-                "自定义倍速：1.0 ~ 2.0 倍无级调节（0.1 步进），不依赖宿主档位",
-                "倍速上限 2.0x：常规与长按是同一条播放器通路，native 引擎把超过 2.0 的请求降档——官方面板的 3.0x 实测只有约 1.5x，2.0x 已是物理上限",
-                "定时关闭：到点停播并直接熄屏（需给 ReadGuo 授予 root）");
-
-        featureCard(body, "交互与自动化",
-                "双击屏幕直接打开评论区（横屏三击），可吞掉第二次点击避免误触点赞",
-                "清屏省心：清屏状态下 10 秒不碰屏幕，自动收起其余控件只留视频，触摸立即恢复",
-                "屏蔽「发现新版本」升级弹窗");
-
-        featureCard(body, "使用方式",
-                "在 LSPosed 中启用本模块，作用域勾选「红果免费短剧」",
-                "强制停止红果后重新打开",
-                "长按底部「首页」标签唤出设置面板，或在播放设置弹层里点「ReadGuo 设置」",
-                "面板里所有改动即时生效，无需重启红果");
+        /* ---------- 重置：清空某应用里本模块保存的配置并重启它（需 root） ---------- */
+        LinearLayout reset = MiUi.group(this, p, body, "重置");
+        for (int i = 0; i < APPS.length; i++) {
+            if (i > 0) {
+                MiUi.divider(this, p, reset);
+            }
+            final String pkg = APPS[i][0];
+            final String name = APPS[i][1];
+            boolean installed = installedVersion(pkg) != null;
+            LinearLayout row = MiUi.row(this, p, reset, name,
+                    installed ? "清空本模块在该应用里保存的配置并重启它（需 root）" : "未安装",
+                    MiUi.I_APPS);
+            row.addView(dangerBtn("重置", installed, new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    confirmReset(java.util.Collections.singletonList(pkg),
+                            "将清空本模块在" + name + "里保存的全部配置并恢复默认，"
+                                    + "然后重启" + name + "一次。\n\n此操作不可撤销。");
+                }
+            }));
+        }
+        MiUi.divider(this, p, reset);
+        TextView allBtn = dangerBtn("重置所有模块设置", true, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                java.util.List<String> pkgs = new java.util.ArrayList<>();
+                for (String[] e : APPS) {
+                    if (installedVersion(e[0]) != null) {
+                        pkgs.add(e[0]);
+                    }
+                }
+                if (pkgs.isEmpty()) {
+                    toast("没有已安装的适配应用");
+                    return;
+                }
+                confirmReset(pkgs,
+                        "将清空本模块在全部应用里保存的配置并恢复默认，"
+                                + "然后重启各应用一次。\n\n此操作不可撤销。");
+            }
+        });
+        reset.addView(allBtn, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView resetHint = MiUi.footer(this, p,
+                "配置保存在各应用自己的空间里，重置只影响所选应用。需要 root。");
+        resetHint.setPadding(MiUi.dp(this, 4), MiUi.dp(this, 10),
+                MiUi.dp(this, 4), MiUi.dp(this, 4));
+        body.addView(resetHint);
         return col;
     }
 
-    /** 一个分组：分组标题（卡外）+ 白卡，卡内每条要点一行，行间一条缩进分割线。 */
+    /** 危险色（iOS 红）：MiUi 调色板没有危险色，这里补一个给重置类动作用。 */
+    private static final int DANGER = 0xFFFF3B30;
+
+    /** 危险色文字按钮：正常红字，未安装时置灰禁用。 */
+    private TextView dangerBtn(String text, boolean enabled, View.OnClickListener l) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        t.setTextColor(enabled ? DANGER : p.hint);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(dp(14), dp(12), dp(14), dp(12));
+        t.setBackground(MiUi.pressable(this, p, 10));
+        t.setEnabled(enabled);
+        if (enabled && l != null) {
+            t.setOnClickListener(l);
+        }
+        return t;
+    }
+
+    /** 重置确认框：确认后清空所选应用里本模块的配置并重启（需 root）。 */
+    private void confirmReset(final java.util.List<String> pkgs, String message) {
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("确认重置")
+                .setMessage(message)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("重置", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        doReset(pkgs);
+                    }
+                })
+                .show();
+    }
+
+    /**
+     * 后台执行重置（需 root）：逐个目标包强停 → 清掉模块配置（含 .bak）→ 重新拉起。
+     * 配置在各应用自己的 shared_prefs 里，模块进程写不了别人的私有目录，只能走 su。
+     */
+    private void doReset(final java.util.List<String> pkgs) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                boolean ok = true;
+                for (final String pkg : pkgs) {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            toast("已清空模块配置，正在重启" + appName(pkg));
+                        }
+                    });
+                    if (!RootShell.run(resetShell(pkg)).ok()) {
+                        ok = false;
+                    }
+                }
+                if (!ok) {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            toast("重置失败：请确认已授予 root 权限");
+                        }
+                    });
+                }
+            }
+        }, "rg-reset").start();
+    }
+
+    /** 重置一个目标包的 shell：强停 → 清配置（含 .bak，user / user_de 两处）→ 重新拉起。 */
+    private static String resetShell(String pkg) {
+        StringBuilder sb = new StringBuilder("am force-stop " + pkg);
+        for (String f : new String[]{"rg_tools_cfg.xml", "rg_confirm_state.xml"}) {
+            for (String dir : new String[]{"/data/user/0/", "/data/user_de/0/"}) {
+                sb.append("; rm -f ").append(dir).append(pkg)
+                        .append("/shared_prefs/").append(f);
+                sb.append("; rm -f ").append(dir).append(pkg)
+                        .append("/shared_prefs/").append(f).append(".bak");
+            }
+        }
+        sb.append("; monkey -p ").append(pkg)
+                .append(" -c android.intent.category.LAUNCHER 1");
+        return sb.toString();
+    }
+
+    /** 包名 → 显示名（重置提示里用）。 */
+    private static String appName(String pkg) {
+        for (String[] e : APPS) {
+            if (e[0].equals(pkg)) {
+                return e[1];
+            }
+        }
+        return pkg;
+    }
+
+    /** 某个应用的详细功能：全屏弹层，排版复用 featureCard。 */
+    private void showAppDetail(int idx) {
+        final String pkg = APPS[idx][0];
+        String name = APPS[idx][1];
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(p.bg);
+
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(dp(6), dp(8), dp(16), dp(8));
+        bar.setMinimumHeight(dp(56));
+
+        TextView back = new TextView(this);
+        back.setText("‹");
+        back.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
+        back.setTextColor(p.title);
+        back.setPadding(dp(12), 0, dp(12), 0);
+        bar.addView(back);
+
+        TextView title = MiUi.rowTitle(this, p, name);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        bar.addView(title);
+        root.addView(bar);
+
+        final ScrollView sv = new ScrollView(this);
+        sv.setFillViewport(true);
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(0, 0, 0, dp(16));
+        sv.addView(body);
+        root.addView(sv, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        fillAppDetail(body, pkg);
+
+        /* 全屏 Dialog 也要自己补系统栏内边距。
+         *
+         * 这个模块 App 是 targetSdk 35，系统强制 edge-to-edge，`setStatusBarColor`
+         * 已经不起作用 —— 不补内边距的话标题会被状态栏压住，而且窗口顶部会露出
+         * 主题自带的那条深灰（就是「右上角一块颜色不对」的来源）。
+         * 做法和主页面一致：让内容延伸进系统栏，再用 insets 把标题行往下推。 */
+        final LinearLayout fbar = bar;
+        final int barPadTop = dp(8);
+        root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            @Override
+            public WindowInsets onApplyWindowInsets(View view, WindowInsets insets) {
+                int top;
+                int bottom;
+                if (Build.VERSION.SDK_INT >= 30) {
+                    android.graphics.Insets bars = insets.getInsets(
+                            WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                    top = bars.top;
+                    bottom = bars.bottom;
+                } else {
+                    top = insets.getSystemWindowInsetTop();
+                    bottom = insets.getSystemWindowInsetBottom();
+                }
+                fbar.setPadding(fbar.getPaddingLeft(), top + barPadTop,
+                        fbar.getPaddingRight(), barPadTop);
+                sv.setPadding(0, 0, 0, bottom);
+                return insets;
+            }
+        });
+
+        final Dialog d = new Dialog(this, android.R.style.Theme_Translucent_NoTitleBar);
+        d.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        d.setContentView(root);
+        Window w = d.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(p.bg));
+            w.setLayout(ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT);
+            if (Build.VERSION.SDK_INT >= 30) {
+                w.setDecorFitsSystemWindows(false);
+            }
+            w.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+            w.setStatusBarColor(Color.TRANSPARENT);
+            w.setNavigationBarColor(Color.TRANSPARENT);
+            // 状态栏变透明后，图标默认是浅色（白），在浅底上几乎看不见 ——
+            // 按当前配色亮度切成深色图标。深色主题下保持浅色。
+            boolean lightBg = brightness(p.bg) > 128;
+            if (Build.VERSION.SDK_INT >= 30 && w.getInsetsController() != null) {
+                int mask = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS;
+                w.getInsetsController().setSystemBarsAppearance(lightBg ? mask : 0, mask);
+            } else if (Build.VERSION.SDK_INT >= 23) {
+                w.getDecorView().setSystemUiVisibility(lightBg
+                        ? View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR : 0);
+            }
+        }
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                d.dismiss();
+            }
+        });
+        d.show();
+        root.requestApplyInsets();
+    }
+
+    /**
+     * 按包名填该应用的详细功能。
+     *
+     * <p>v3.21 起三个应用统一成同一套分组（同名、同顺序、同排版），按功能归组，
+     * 不再按「已实现 / 暂未实现」分：界面显示 / 播放与交互 / 净化 / 组件隐藏 /
+     * 面板入口 / 已知限制 —— 某应用没有该类功能就不建这张卡。
+     */
+    private void fillAppDetail(LinearLayout body, String pkg) {
+        if ("com.phoenix.read".equals(pkg)) {
+            featureCard(body, "界面显示",
+                    "状态栏：隐藏系统状态栏（不再自绘底色，藏掉后露出的是宿主自己的界面）",
+                    "底部标签栏：按标签文字勾选隐藏，剩余标签自动摊满整行",
+                    "底部导航栏：软件内全程隐藏小白条，退出软件才恢复",
+                    "界面透明度：首页/二级页上视频以外的浮层统一调透明，重置才还原");
+            featureCard(body, "播放与交互",
+                    "默认最高画质：起播自动选最高可用档",
+                    "自定义倍速：1.0 ~ 2.0 倍无级调节（0.1 步进），不依赖宿主档位",
+                    "倍速上限 2.0x：native 引擎把超过 2.0 的请求降档，官方面板的 3.0x 实测约 1.5x",
+                    "定时关闭：到点停播并直接熄屏（需给 ReadGuo 授予 root）",
+                    "双击屏幕：直接打开评论区（横屏三击），可吞掉第二次点击避免误触点赞",
+                    "清屏省心：清屏后 10 秒不碰屏幕自动收起其余控件，触摸立即恢复");
+            featureCard(body, "净化",
+                    "净化：屏蔽「发现新版本」升级弹窗、广告位、福袋挂件");
+            featureCard(body, "组件隐藏",
+                    "组件显隐：12 个常用组件（顶栏 / 右侧互动 / 底部条 / 标题 / 热评 / 进度条）逐项开关",
+                    "自定义隐藏清单：「扫描当前页面」自动列出，或手写规则（cls: / @文案 / text: / id:）",
+                    "悬浮球点选：球拖到哪、点哪个控件就藏哪个，支持上一级 / 下一级 / 列表模式 / 编辑模式（多步改动保存时一次确认）");
+            featureCard(body, "面板入口",
+                    "长按底部「首页」标签直接唤出面板",
+                    "播放页：右上角 ⋮ → 播放设置 → 最下方「ReadGuo 设置」");
+        } else if ("com.dragon.read".equals(pkg)) {
+            featureCard(body, "界面显示",
+                    "屏蔽底部「赚钱」：让宿主的 tab 工厂返回 null，底栏不留空位",
+                    "精简「我的」页右侧边栏：收起右上角 ☰ 抽屉里的订单 / 浏览历史 / 创作中心 / 预约与协议链接");
+            featureCard(body, "组件隐藏",
+                    "悬浮球点选：球拖到哪、点哪个控件就藏哪个，支持上一级 / 下一级 / 列表模式 / 编辑模式（多步改动保存时一次确认）",
+                    "扫描组件：自动列出当前页面可隐藏的组件，一键隐藏",
+                    "已隐藏组件：逐条列出当前隐藏项，可单独点「恢复」，也可一键全部恢复");
+            featureCard(body, "面板入口",
+                    "长按底部「书城」标签约 0.6 秒，弹出「番茄精简」面板",
+                    "面板里的开关改完需重启番茄生效");
+            featureCard(body, "已知限制",
+                    "金刚位那排（我的订单 / 浏览历史 / 我的消息 / 创作中心 / 我的预约）：整页是 Compose 渲染，View 层拿不到节点，需要 hook 卡片分发器，混淆名每版都变");
+        } else if ("com.xs.fm".equals(pkg)) {
+            featureCard(body, "界面显示",
+                    "底栏：只留「首页」「我的」，商城 / 听歌 / 领现金三格隐藏，剩余两格平分整行",
+                    "精简「我的」页：去掉金刚位（消息 / 优惠券 / 购物车 / 订单 / 游戏）与「我的资产」两块",
+                    "去掉四宫格：隐藏右上角的「全部功能」入口，红点一并消失");
+            featureCard(body, "净化",
+                    "广告全关：广告位判定恒 false，开屏 / 首页信息流 / 听书贴片一并拦下",
+                    "启动弹窗：进程起来后 10 秒内的活动 / 签到 / 福利浮层直接关闭");
+            featureCard(body, "组件隐藏",
+                    "悬浮球点选：球拖到哪、点哪个控件就藏哪个，支持上一级 / 下一级 / 列表模式 / 编辑模式（多步改动保存时一次确认）",
+                    "扫描组件：自动列出当前页面可隐藏的组件，一键隐藏",
+                    "已隐藏组件：逐条列出当前隐藏项，可单独点「恢复」，也可一键全部恢复");
+            featureCard(body, "面板入口",
+                    "长按底部「首页」格（左侧 1/3）约 0.6 秒",
+                    "二级页没有底栏，长按顶部中央同样能唤出");
+            featureCard(body, "已知限制",
+                    "6.7.8 是另一代代码：暗色、DPI、界面透明度、播放器倍速、定时熄屏这些在红果 7.x 上的锚点，在畅听里都不存在，需要逐个重新逆向",
+                    "「全部功能」页本身没清空 —— 入口已经拿掉，页面留着不影响使用");
+        } else {
+            featureCard(body, "番茄畅听",
+                    "状态：暂未支持");
+        }
+    }
+
+    /**
+     * 一个分组：分组标题（卡外）+ 白卡，卡内每条要点一行，行间一条缩进分割线。
+     *
+     * <p>v3.13 起改成两行结构：原文案都是「标题：说明」的长段落，15sp 一大坨挤在一起
+     * 完全看不出层次。这里按第一个全角冒号拆开 —— 冒号前当行标题（17sp 正文色），
+     * 冒号后当副标题（13sp 次要色）。没有冒号或冒号太靠后的（说明标题本身很长），
+     * 保持单行标题。
+     */
     private void featureCard(LinearLayout body, String title, String... points) {
         LinearLayout card = MiUi.group(this, p, body, title);
         for (int i = 0; i < points.length; i++) {
             if (i > 0) {
                 MiUi.divider(this, p, card);
             }
-            TextView v = new TextView(this);
-            v.setText(points[i]);
-            v.setTextColor(p.title);
-            v.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-            v.setLineSpacing(dp(3), 1f);
-            v.setIncludeFontPadding(false);
-            v.setPadding(dp(16), dp(13), dp(16), dp(13));
-            card.addView(v);
+            String raw = points[i];
+            int idx = raw.indexOf('：');
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.VERTICAL);
+            row.setPadding(dp(16), dp(12), dp(16), dp(12));
+            if (idx > 0 && idx <= 12) {
+                row.addView(MiUi.rowTitle(this, p, raw.substring(0, idx)));
+                TextView sub = MiUi.rowSub(this, p, raw.substring(idx + 1));
+                sub.setPadding(0, dp(3), 0, 0);
+                sub.setLineSpacing(dp(2), 1f);
+                row.addView(sub);
+            } else {
+                row.addView(MiUi.rowTitle(this, p, raw));
+            }
+            card.addView(row);
         }
     }
 
-    /* ==================== 设置页 ==================== */
-
-    private View settingsPage() {
-        LinearLayout col = page("设置", -1, null);
-        LinearLayout body = (LinearLayout) holder.get(col);
-        ModuleSettings.build(this, p, body);
-        return col;
-    }
+    /* ==================== 设置页（v3.07 已移除） ==================== */
+    /*
+     * 原先这里挂 ModuleSettings.build()。
+     * 删除原因见 bottomBar() 处的注释：那条配置通道在 Android 11+ 已经死了，
+     * 页面留着只会让用户以为「改了就生效」。
+     */
 
     /** 卡片内一行开关：标题 + 副标题 + 右侧开关（行高与普通列表行一致）。 */
     private void switchRow(LinearLayout card, String title, String sub, boolean on,
@@ -822,7 +1303,7 @@ public class MainActivity extends Activity {
         // 先问一句文件状态：大小/时间/是否存在都拿得到，用户一眼知道是不是还没生成
         RootShell.Result st = RootShell.run("ls -l '" + path + "' 2>&1");
         String stat = st.ok() && st.out != null && !st.out.isEmpty()
-                ? st.out.trim() : "（文件不存在，红果跑起来之后才会生成）";
+                ? st.out.trim() : "（文件不存在，宿主跑起来之后才会生成）";
 
         RootShell.Result r = RootShell.run(
                 "tail -n " + lines + " '" + path + "' 2>/dev/null", 200000);
@@ -863,9 +1344,9 @@ public class MainActivity extends Activity {
         MiUi.divider(this, p, card);
         valueRow(card, "作者", AUTHOR);
         MiUi.divider(this, p, card);
-        valueRow(card, "作用域", "红果免费短剧");
+        valueRow(card, "作用域", "红果免费短剧 / 番茄免费小说 / 番茄畅听");
         MiUi.divider(this, p, card);
-        valueRow(card, "运行框架", "LSPosed / libxposed 102");
+        valueRow(card, "运行框架", "LSPosed / libxposed 100+");
         MiUi.divider(this, p, card);
         valueRow(card, "构建时间", buildTime());
 
@@ -904,7 +1385,7 @@ public class MainActivity extends Activity {
         });
         MiUi.divider(this, p, self);
         LinearLayout l1 = MiUi.row(this, p, self, "运行日志",
-                "红果进程里的 hook 记录", MiUi.I_LOG);
+                "当前宿主进程里的 hook 记录", MiUi.I_LOG);
         l1.addView(MiUi.chevron(this, p));
         l1.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -927,19 +1408,6 @@ public class MainActivity extends Activity {
     }
 
     /* ==================== 小工具 ==================== */
-
-    private void refreshSettings() {
-        // 设置页的开关状态与副标题是快照，重建一次最省事
-        View old = mPages[2];
-        View fresh = settingsPage();
-        ViewGroup parent = (ViewGroup) old.getParent();
-        int idx = parent.indexOfChild(old);
-        parent.removeViewAt(idx);
-        parent.addView(fresh, idx, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        mPages[2] = fresh;
-        fresh.setVisibility(mTab == 2 ? View.VISIBLE : View.GONE);
-    }
 
     private String versionName() {
         try {
@@ -1021,6 +1489,11 @@ public class MainActivity extends Activity {
 
     private int dp(float v) {
         return MiUi.dp(this, v);
+    }
+
+    /** 颜色亮度（0~255），用来决定状态栏图标用深色还是浅色。 */
+    private static int brightness(int c) {
+        return (((c >> 16) & 0xFF) + ((c >> 8) & 0xFF) + (c & 0xFF)) / 3;
     }
 
     @SuppressWarnings("unused")

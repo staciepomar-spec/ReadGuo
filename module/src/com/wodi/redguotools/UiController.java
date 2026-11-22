@@ -68,11 +68,12 @@ public final class UiController {
     private static final WeakHashMap<Activity, Boolean> CONSUME = new WeakHashMap<>();
     private static final WeakHashMap<Activity, Boolean> SWALLOW = new WeakHashMap<>();
     private static final WeakHashMap<Activity, Tap> TAPS = new WeakHashMap<>();
-    private static final WeakHashMap<Activity, Bar> BARS = new WeakHashMap<>();
     /** 全局重应用循环只跑一份，且只作用于前台 Activity（见 startReapplyLoop）。 */
     private static volatile boolean sLoopStarted;
     private static final WeakHashMap<Activity, Long> LAST_TOUCH = new WeakHashMap<>();
     private static final WeakHashMap<Activity, List<View>> IDLE_HIDDEN = new WeakHashMap<>();
+    /** 记忆「用户开着清屏」：cs 瞬时为 false（切集重建中）不该当成用户关掉了。 */
+    private static final WeakHashMap<Activity, Boolean> IDLE_CS_LOCK = new WeakHashMap<>();
     private static long LAST_IDLE_DBG;
 
     /** 已经为哪些页面落过「评论区入口找不到」的视图树（避免反复重写同一个文件）。 */
@@ -83,6 +84,16 @@ public final class UiController {
 
     /** 标记「可见性是我们改成 INVISIBLE 的」—— 只有这种才允许我们再改回去。 */
     private static final int TAG_WEHID = 0x5A5A0002;
+
+    /**
+     * 「自定义清单」专用标记。
+     *
+     * <p>槽位和清单都用 {@code TAG_WEHID} 表示"是模块藏的"，但语义不同：
+     * 槽位（控制栏/标题这些）在暂停时要还原出来给人操作；
+     * 清单是用户一格格点出来、明确要藏的东西，暂停也不该冒出来。
+     * 只看 TAG_WEHID 分不开两者，于是加这一个标记，{@link #showHiddenForPause} 跳过它。
+     */
+    private static final int TAG_LIST = 0x5A5A0003;
 
     /** 底部标签栏专用（与上面的浮层体系互不干扰，applyDesired 不认识它们）。 */
     private static final int TAG_BTAB_WEHID = 0x5A5A0004;
@@ -107,6 +118,8 @@ public final class UiController {
      * 也用于在 App 退到后台时决定要不要还回去。
      */
     private static final WeakHashMap<Activity, Boolean> NAV_HIDDEN_MARK = new WeakHashMap<>();
+    /** 「系统状态栏是本模块藏的」——只有标记在，才由我们负责恢复。 */
+    private static final WeakHashMap<Activity, Boolean> SB_HIDDEN_MARK = new WeakHashMap<>();
 
     /**
      * 整个 App 当前是否处于前台。
@@ -231,6 +244,16 @@ public final class UiController {
         }
     }
 
+    /**
+     * 把已捕获、未致命的异常写进崩溃文件。
+     *
+     * <p>护栏接住的异常不会让进程死掉，但用户视角仍是「功能没反应」，
+     * 不留痕就等于没有反馈入口。统一走这里，崩溃证据集中在一份文件里。
+     */
+    public static void crashDump(String where, Throwable t) {
+        CrashGuard.record(where, t);
+    }
+
     private static void resetLogFile(Activity a) {
         try {
             File dir = a.getExternalFilesDir(null);
@@ -326,6 +349,12 @@ public final class UiController {
             DarkMode.apply(a);
         } catch (Throwable t) {
             Log.e(TAG, "apply dark mode failed", t);
+        }
+        // 弹幕强制显示：宿主可能在别处把开关拨回去，进页面时补一次
+        try {
+            Danmaku.apply(a);
+        } catch (Throwable t) {
+            Log.e(TAG, "apply danmaku failed", t);
         }
         // 前台计数 +1（与 RGModule 的 onStop 钩子配对），供导航栏「仅退出时恢复」判断
         onAppForeground(a);
@@ -515,6 +544,9 @@ public final class UiController {
             MISS_DUMPED.clear();
             restoreNavBar(a);
             NAV_HIDDEN_MARK.remove(a);
+            if (Boolean.TRUE.equals(SB_HIDDEN_MARK.remove(a))) {
+                setSystemBarVisible(a, true);
+            }
             View decor = a.getWindow().getDecorView();
             decor.post(new Runnable() {
                 @Override
@@ -563,102 +595,89 @@ public final class UiController {
     }
 
     /* ------------------------------------------------------------------ */
-    /* 状态栏：隐藏系统栏 + 自绘底色横条                                     */
+    /* 状态栏：只隐藏系统栏，不画任何底色                                    */
     /* ------------------------------------------------------------------ */
 
     /**
-     * 状态栏自绘载体的状态。
+     * 只做一件事：按配置把系统状态栏 {@code hide} 掉。
      *
-     * <p>它只做一件事：当「隐藏系统状态栏」开启时，在窗口顶部铺一条横条来填底色，
-     * 避免系统栏被隐藏后露出一条突兀的空隙。**不承载任何文字与交互** ——
-     * 早期的「点击显示时间/电量数字」子功能已移除。
+     * <p><b>不再自绘任何底色横条。</b>早期版本在 DecorView 顶部铺一条
+     * {@code statusBarHeight} 高的 View 来「补底色」，但那条横条的位置与宿主窗口
+     * 是否铺到屏幕顶部强相关：窗口被系统让开状态栏时它落在状态栏**下面**（多出一条），
+     * 窗口铺满时它又正好盖住状态栏；而「跟随」一旦取错（宿主是浅色皮肤、页面却是深色），
+     * 就变成反馈里的那条白带。这块区域本来就该由宿主自己画 —— 藏掉系统栏之后露出什么，
+     * 就是宿主给什么，模块不介入。
      */
-    private static final class Bar {
-        LinearLayout root;
-    }
-
-    private static Bar buildBar(final Activity a) {
-        Bar b = new Bar();
-        LinearLayout bar = new LinearLayout(a);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(a, 16), 0, dp(a, 16), 0);
-        bar.setClickable(false);
-        bar.setFocusable(false);
-
-        b.root = bar;
-        bar.setTag(b);
-        return b;
-    }
-
-    private static int statusBarHeight(Context c) {
-        Resources r = c.getResources();
-        int id = r.getIdentifier("status_bar_height", "dimen", "android");
-        if (id > 0) {
-            int h = r.getDimensionPixelSize(id);
-            if (h > 0) {
-                return h;
-            }
-        }
-        return dp(c, 24);
-    }
-
     private static void applyStatusBar(Activity a) {
         if (!isHost(a)) {
             return;
         }
-        Window w = a.getWindow();
-        if (w == null) {
+        if (a.getWindow() == null) {
             return;
         }
-        View decor = w.getDecorView();
-        if (!(decor instanceof ViewGroup)) {
-            return;
-        }
-        ViewGroup root = (ViewGroup) decor;
-
-        Bar b = BARS.get(a);
-        if (b == null || b.root.getParent() == null) {
-            b = buildBar(a);
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, statusBarHeight(a));
-            lp.gravity = Gravity.TOP;
-            root.addView(b.root, lp);
-            BARS.put(a, b);
-        }
-
-        boolean hide = Config.hideStatusBar(a);
-        setSystemBarVisible(a, !hide);
-        b.root.getLayoutParams().height = statusBarHeight(a);
-        render(a);
+        applyStatusBarAutoHide(a);
+        logStatusBar(a, Config.hideStatusBar(a));
     }
 
     /**
-     * 按配置渲染底色横条。
+     * 「隐藏系统状态栏」的**周期压制**（跟着 1.2s 重应用循环走）。
      *
-     * <p>不隐藏系统栏时横条完全让位（{@code GONE}）；已移除原有数字绘制与定时刷新。
+     * <p>为什么不能只在进入页面时藏一次：宿主切集、横竖屏切换、弹层获得焦点都会重新下发
+     * insets，系统随即把状态栏恢复；只藏一次的话，横屏全屏播放里那条又会冒出来。
+     *
+     * <p>为什么开关关掉时**绝不主动 show**：横屏全屏播放本来就没状态栏，是宿主自己藏起来的。
+     * 旧实现每次 resume 都无条件 {@code show(statusBars())}，等于把一条宿主没设计过的系统栏
+     * 画到视频上（浅色皮肤下就是那条白条）。只有确实打过标记（本模块藏的）才由我们恢复。
      */
-    private static void render(Activity a) {
-        Bar b = BARS.get(a);
-        if (b == null) {
-            return;
-        }
+    private static void applyStatusBarAutoHide(Activity a) {
         if (!Config.hideStatusBar(a)) {
-            b.root.setVisibility(View.GONE);
+            if (Boolean.TRUE.equals(SB_HIDDEN_MARK.get(a))) {
+                setSystemBarVisible(a, true);
+                SB_HIDDEN_MARK.remove(a);
+            }
             return;
         }
-        b.root.setVisibility(View.VISIBLE);
+        setSystemBarVisible(a, false);
+        SB_HIDDEN_MARK.put(a, Boolean.TRUE);
+    }
 
-        int bg = Config.statusBarBg(a);
-        int color = bg == Config.BG_BLACK ? Color.BLACK
-                : bg == Config.BG_WHITE ? Color.WHITE
-                : Color.TRANSPARENT;
-        b.root.setBackgroundColor(color);
+    /** 上一次写进日志的状态栏快照，只在变化时落盘，避免每次 onResume 都刷一行。 */
+    private static String sSbLogged;
 
-        // 宿主可能在我们之后继续往 DecorView 加子视图，重新置顶避免被盖住
+    /**
+     * 记一行状态栏现状，供「隐藏没生效 / 顶部位置不对」这类反馈定位。
+     *
+     * <p>{@code insetTop} 是关键：> 0 说明系统仍替状态栏留着那块高度（宿主窗口没铺到顶），
+     * 此时状态栏位置那块是空的，宿主自己画什么就看到什么；= 0 才是真正沉浸，宿主内容直接顶到屏幕边。
+     */
+    private static void logStatusBar(Activity a, boolean hide) {
+        int insetTop = -1;
         try {
-            b.root.bringToFront();
+            Window w = a.getWindow();
+            View decor = w != null ? w.getDecorView() : null;
+            if (decor != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                WindowInsets wi = decor.getRootWindowInsets();
+                if (wi != null) {
+                    insetTop = wi.getInsets(WindowInsets.Type.statusBars()).top;
+                }
+            }
         } catch (Throwable ignored) {
+        }
+        // 宿主那条「状态栏底色」是 DecorView 里的 android.R.id.statusBarBackground，
+        // 系统栏没藏干净时它就是那条白带 —— 高度直接说明问题出在哪一边。
+        String sbBg = "?";
+        try {
+            Window w = a.getWindow();
+            View decor = w != null ? w.getDecorView() : null;
+            View v = decor != null ? decor.findViewById(android.R.id.statusBarBackground) : null;
+            sbBg = v == null ? "none"
+                    : v.getVisibility() == View.VISIBLE ? String.valueOf(v.getHeight()) : "gone";
+        } catch (Throwable ignored) {
+        }
+        String s = "statusbar: hide=" + hide + " insetTop=" + insetTop + " hostBar=" + sbBg;
+        if (!s.equals(sSbLogged)) {
+            sSbLogged = s;
+            logFile(s);
         }
     }
 
@@ -730,9 +749,13 @@ public final class UiController {
             if (!isPlayPage(a) || !clearScreenOn(root, a, size, null)) {
                 showHiddenForPause(root);
             }
+            // 清单每轮补一次：暂停期间页面照样重建，新上屏的实例上没有任何标记，
+            // 只靠 showHiddenForPause 的反向逻辑补不回来（而且它按语义会跳过清单项）
+            applyListHideOnly(root, a, size);
             applyBottomTabs(root, a);
             applyIdleClear(root, a);
             applyNavAutoHide(a);
+        applyStatusBarAutoHide(a);
             logApplyCost(SystemClock.uptimeMillis() - t0, 0);
             return;
         }
@@ -766,8 +789,11 @@ public final class UiController {
             // （见 applyLayerAlpha），在这里再乘会平方。统一放到命中后的
             // allocateGlobal 里按「是否已在被降层内」分配。
             int eff = alpha;
+            // 同款商品入口照自定义清单的语义用 GONE：它是一条独立的胶囊，
+            // 保留 INVISIBLE 占位会在「全屏观看」和剧名之间留出一道空白。
+            boolean goneSlot = "seedentry".equals(key);
             for (String rule : Config.SLOT_RULES[i]) {
-                addTask(tasks, g, rule, hide, eff);
+                addTask(tasks, g, rule, hide, eff, goneSlot);
             }
         }
 
@@ -797,6 +823,16 @@ public final class UiController {
                 }
             }
         }
+
+        /*
+         * 标题行补一条「结构定位」。
+         *
+         * 7.4 起首页卡片的剧名换成了通用 ShortSeriesScaleTextView（整棵树 128 个
+         * 实例），既没有稳定类名也没有稳定资源 id，槽位里那三条规则全部落空 ——
+         * 只剩 ShortSeriesInfoHeaderView 那个 0 高度占位行命中，于是「标题透明度
+         * 怎么拉都不动」。这里按布局结构补一次，见 collectTitleRows。
+         */
+        collectTitleRows(root, a, size, desired);
 
         long t1 = SystemClock.uptimeMillis();
         /*
@@ -834,6 +870,7 @@ public final class UiController {
         applyBottomTabs(root, a);
         applyIdleClear(root, a);
         applyNavAutoHide(a);
+        applyStatusBarAutoHide(a);
         logApplyCost(SystemClock.uptimeMillis() - t0, costWrite);
     }
 
@@ -1100,6 +1137,62 @@ public final class UiController {
     }
 
     /**
+     * 清扫空闲隐藏记录，剔除已经失效的条目，**并返回剔除条数**。
+     *
+     * <p><b>为什么需要清扫：</b>切到下一集时宿主会重建（或复用）组件视图 ——
+     * 旧实例要么被销毁摘下窗口，要么被 {@code setVisibility(VISIBLE)} 重新显示。
+     * 这两种情况下旧的 {@link #IDLE_HIDDEN} 都不能再代表「当前处于隐藏态」，
+     * 否则 {@link #applyIdleClear} 每轮都在提前 return，新一页的组件永远没人管
+     * （用户看到的正是「切下一集，组件又冒出来了」）。
+     *
+     * <p><b>有效性只看两件事：</b>还挂在窗口上、且可见性仍是我们设的 INVISIBLE。
+     * 刻意**不判屏幕坐标** —— 预加载的相邻页实例本来就带着 INVISIBLE 留在树上，
+     * 它们不是「失效」，把它们一并清掉反而会让触摸恢复漏掉这些视图。
+     *
+     * <p>失效条目按「解除本模块干预」处理：清标记 + 恢复成 VISIBLE。
+     * 与 {@link #restoreIdleHidden}（触摸恢复，用户明确要看回来）不同，
+     * 这里可能是宿主自己改成 GONE 的，不能无条件点亮。
+     */
+    private static int sweepIdleRecord(Activity a) {
+        List<View> hid = IDLE_HIDDEN.remove(a);
+        if (hid == null || hid.isEmpty()) {
+            return 0;
+        }
+        List<View> kept = new ArrayList<>(hid.size());
+        int dropped = 0;
+        for (int i = 0, n = hid.size(); i < n; i++) {
+            View v = hid.get(i);
+            if (v == null) {
+                dropped++;
+                continue;
+            }
+            if (v.isAttachedToWindow() && v.getVisibility() == View.INVISIBLE
+                    && Boolean.TRUE.equals(v.getTag(TAG_IDLE_WEHID))) {
+                kept.add(v);
+                continue;
+            }
+            dropped++;
+            if (Boolean.TRUE.equals(v.getTag(TAG_IDLE_WEHID))) {
+                v.setTag(TAG_IDLE_WEHID, null);
+                // 只解除「本模块把它藏起来」这一层：INVISIBLE 复原成 VISIBLE。
+                // 若当前是 GONE，那是宿主自己收起的（清屏行为），**不能点亮** ——
+                // 点亮等于把宿主的清屏状态顶掉。
+            }
+            if (v.getVisibility() == View.INVISIBLE) {
+                v.setVisibility(View.VISIBLE);
+            }
+        }
+        if (!kept.isEmpty()) {
+            IDLE_HIDDEN.put(a, kept);
+        }
+        if (dropped > 0) {
+            // 只在真的发生（切集/宿主重建视图）时才落一行，1.2s 一轮的循环不刷屏
+            logFile("idle: stale record " + dropped + "/" + hid.size() + " dropped (episode switch");
+        }
+        return dropped;
+    }
+
+    /**
      * 周期调用：清屏开着且超过 {@link #IDLE_HIDE_MS} 无触摸 →
      * 把槽位 + 自定义清单命中的、当前可见的实例整层收起（INVISIBLE，保留占位）。
      * 与清屏的宿主行为互不冲突：宿主藏的我们不动，我们藏的靠触摸恢复。
@@ -1114,7 +1207,19 @@ public final class UiController {
         }
         List<View> hid = IDLE_HIDDEN.get(a);
         if (hid != null && !hid.isEmpty()) {
-            return;   // 已处于空闲隐藏态，等触摸即时恢复
+            /*
+             * 记录还在。先剔掉已经失效的条目（视图被宿主销毁摘下窗口、
+             * 或可见性被宿主改回 VISIBLE），让下面能按新一页的视图重新收起。
+             *
+             * 这里**故意不因 dropped==0 就 return**：记录完好只说明「上次藏的那批还在」，
+             * 不代表「当前没有新视图冒出来」—— 切集恰恰是宿主换掉整批实例的时刻，
+             * 旧记录完全可能整体存活而新的一批同时可见。早退 = 漏藏（实测复现过）。
+             * 代价是隐藏态下每轮多一次全树遍历（~13ms），换来的是不会漏。
+             *
+             * 也不重置 LAST_TOUCH：自动连播切集没有触摸事件，用户确实没碰过屏幕，
+             * 不该因为切集重新计时（否则要再等 clearIdleSec 才藏，等于没修）。
+             */
+            sweepIdleRecord(a);
         }
         int[] size = screenSize(a, root);
         StringBuilder dbg = new StringBuilder();
@@ -1126,8 +1231,23 @@ public final class UiController {
             logFile("idle dbg: cs=" + cs + " sinceTouch="
                     + (t0 == null ? -1 : SystemClock.uptimeMillis() - t0) + dbg);
         }
-        if (!cs) {
-            return;
+        /*
+         * 「清屏开着」用**记忆锁**而不是 cs 的瞬时值。
+         *
+         * 踩过的坑：切集瞬间宿主要重建整棵浮层，cs 会短暂地翻成 false
+         * （实测日志 `stale record` 刚触发，紧接着 `cs=false` 直接 return，
+         * 于是这一轮白清、组件在屏上挂了十几秒，直到 cs 自己恢复）。
+         * 同一个 bug 因此表现时好时坏 —— 取决切集那一瞬宿主重建到哪一步了。
+         *
+         * cs 的语义其实是「用户开着清屏」这个**持久意图**，切集导致的瞬时 false
+         * 只是重建过程的中间态，不该把它当成「用户关掉了清屏」。
+         * 触摸会刷新 LAST_TOUCH 并重置锁 —— 用户真要恢复时一定会先碰屏幕，
+         * 这正是 restoreIdleHidden 的触发条件，两者本来就该同步。
+         */
+        if (cs) {
+            IDLE_CS_LOCK.put(a, Boolean.TRUE);
+        } else if (!Boolean.TRUE.equals(IDLE_CS_LOCK.get(a))) {
+            return;   // 从未见过清屏开启（用户没开），不隐藏
         }
         Long t = LAST_TOUCH.get(a);
         if (t == null) {
@@ -1158,9 +1278,31 @@ public final class UiController {
             if (v.getVisibility() != View.VISIBLE || !v.isShown()) {
                 continue;   // 宿主已收起 / 页外实例
             }
-            if (Boolean.TRUE.equals(v.getTag(TAG_WEHID))
-                    || Boolean.TRUE.equals(v.getTag(TAG_IDLE_WEHID))) {
-                continue;
+            if (Boolean.TRUE.equals(v.getTag(TAG_WEHID))) {
+                continue;   // 槽位隐藏：模块自己的常规隐藏，不归空闲清屏管
+            }
+            /*
+             * TAG_IDLE_WEHID **不能**在这里无条件跳过。
+             *
+             * 坑：切到下一集时宿主可能**复用同一批视图实例**，只把可见性改回 VISIBLE
+             * —— tag 还留在上面（tag 挂在 View 上，实例复用就一直带着）。
+             * 旧写法「有 tag 就跳过」于是把这些**当前可见**的视图放过，
+             * 结果是：切集后组件明明在屏上，却因为身上的旧标记而被判定为
+             * 「已经藏好了」，再也不被收起 —— 正是「切下一集组件就冒出来」。
+             *
+             * 正确语义：tag 只用于**恢复时辨认归属**，判断「是否已藏」要看实际可见性。
+             * 而上面已经排除了所有非 VISIBLE 的视图，走到这里的一定是可见的，
+             * 所以只需判断「有没有待恢复记录」，有就先补进记录再照常收起。
+             */
+            if (Boolean.TRUE.equals(v.getTag(TAG_IDLE_WEHID))) {
+                List<View> rec = IDLE_HIDDEN.get(a);
+                if (rec == null) {
+                    rec = new ArrayList<>();
+                    IDLE_HIDDEN.put(a, rec);
+                }
+                if (!rec.contains(v)) {
+                    rec.add(v);   // 复用实例：把「需要恢复」的归属重新登记回去
+                }
             }
             int[] loc = new int[2];
             v.getLocationOnScreen(loc);
@@ -1177,7 +1319,23 @@ public final class UiController {
             v.setTag(TAG_IDLE_WEHID, Boolean.TRUE);
             v.setVisibility(View.INVISIBLE);
         }
-        IDLE_HIDDEN.put(a, toHide);
+        /*
+         * 合并而不是直接 put：清扫后**仍然有效**的旧实例（相邻页预加载的那些）
+         * 已经被 sweepIdleRecord 放回 IDLE_HIDDEN，直接覆盖会让它们从记录里消失 ——
+         * 而它们的可见性仍是 INVISIBLE，触摸恢复只遍历记录，于是永远回不来。
+         */
+        List<View> kept = IDLE_HIDDEN.get(a);
+        if (kept == null || kept.isEmpty()) {
+            IDLE_HIDDEN.put(a, toHide);
+        } else {
+            List<View> merged = new ArrayList<>(kept);
+            for (View v : toHide) {
+                if (!merged.contains(v)) {
+                    merged.add(v);
+                }
+            }
+            IDLE_HIDDEN.put(a, merged);
+        }
         logFile("idle: clear-screen " + (idleHideMs(a) / 1000) + "s -> hide " + toHide.size());
     }
 
@@ -1444,8 +1602,10 @@ public final class UiController {
             if (d[0] == 1) {
                 // 自定义清单项（d[2]==1）用 GONE 不留占位；槽位/浮层维持 INVISIBLE
                 // 保留占位，避免清屏这类宿主自管浮层的重排错位（见下方说明）。
-                v.setVisibility(d.length > 2 && d[2] == 1 ? View.GONE : View.INVISIBLE);
+                boolean listItem = d.length > 2 && d[2] == 1;
+                v.setVisibility(listItem ? View.GONE : View.INVISIBLE);
                 v.setTag(TAG_WEHID, Boolean.TRUE);
+                v.setTag(TAG_LIST, listItem ? Boolean.TRUE : null);
             } else {
                 /*
                  * 只调透明度时**不要碰 visibility**。
@@ -1461,6 +1621,7 @@ public final class UiController {
                 if (Boolean.TRUE.equals(v.getTag(TAG_WEHID))) {
                     v.setVisibility((int) orig[0]);
                     v.setTag(TAG_WEHID, Boolean.FALSE);
+                    v.setTag(TAG_LIST, null);
                 }
                 v.setAlpha(Math.max(0, Math.min(100, d[1])) / 100f);
             }
@@ -1473,11 +1634,140 @@ public final class UiController {
             v.setAlpha(o[1]);
             v.setTag(TAG_ORIG, null);
             v.setTag(TAG_WEHID, null);
+            v.setTag(TAG_LIST, null);
         }
         if (v instanceof ViewGroup) {
             ViewGroup g = (ViewGroup) v;
             for (int i = 0; i < g.getChildCount(); i++) {
                 applyDesired(g.getChildAt(i), desired);
+            }
+        }
+    }
+
+    /* ---------------- 标题行：结构定位（7.4 起类名/id 都不可用） ---------------- */
+
+    /** 类型标签行的类名后缀（未混淆，7.4.2.32 实测仍在用）。 */
+    private static final String TAG_ROW_SUFFIX = "PriorityTagLayout";
+
+    /**
+     * 把「标题行」补进 desired。
+     *
+     * <p><b>为什么不能写规则</b>：宿主 7.4 把首页卡片的剧名换成了通用的
+     * {@code ShortSeriesScaleTextView}（实测首页整棵树 128 个实例 —— 点赞数、
+     * 按钮文字、热度值全是它），类名已经没有辨识度；资源 id 又是每版一换的
+     * 短混淆名（7.3.9.32 是 g41，7.4.2.32 是 d4）。于是槽位里那三条规则全部落空，
+     * 只剩 0 高度的 ShortSeriesInfoHeaderView 还命中 —— 表现就是
+     * 「标题透明度怎么拉都不动」。
+     *
+     * <p><b>改用布局结构</b>：剧名永远紧贴在那排类型标签（PriorityTagLayout）
+     * 的正上方。以标签行为锚点，向上找「纵向距离不超过一个标题行高、宽度够宽」
+     * 的可见文本节点，就是剧名。
+     *
+     * <p>两个防闪的细节：标签行本身可能被「类型标签」槽位隐藏（INVISIBLE 保占位，
+     * 位置仍在），标题也可能已被本模块隐藏 —— 所以可见性判断要允许
+     * {@link #TAG_WEHID} 标记的节点，否则一旦藏起来就再也定位不到，
+     * 下一轮会当成「用户取消隐藏」而恢复，界面开始闪。
+     */
+    private static void collectTitleRows(View root, Activity a, int[] size,
+                                         IdentityHashMap<View, int[]> desired) {
+        boolean hide = Config.overlayHide(a, "plheader");
+        int alpha = Config.overlayAlpha(a, "plheader");
+        if (!hide && alpha >= 100) {
+            return;   // 标题没做任何设置，不必多扫一遍
+        }
+        List<View> tags = new ArrayList<>();
+        collectByClassSuffix(root, TAG_ROW_SUFFIX, tags);
+        if (tags.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < tags.size(); i++) {
+            View title = titleAboveTag(tags.get(i), a, size);
+            if (title != null && !desired.containsKey(title)) {
+                desired.put(title, new int[]{hide ? 1 : 0, alpha, 0});
+                hit("[slot]plheader·anchor", title, a);
+            }
+        }
+    }
+
+    /** 收集整棵树里类名以 suffix 结尾的视图。（复用下面的通用实现） */
+
+    /** 标签行正上方的标题文本节点；找不到返回 null。 */
+    private static View titleAboveTag(View tag, Activity a, int[] size) {
+        if (tag == null || tag.getWidth() <= 0 || tag.getHeight() <= 0) {
+            return null;
+        }
+        int[] tl = new int[2];
+        try {
+            tag.getLocationOnScreen(tl);
+        } catch (Throwable t) {
+            return null;
+        }
+        // 容差 = 标题行高 + 行间距（约 110dp），再大就会够到上一张卡片
+        int maxDy = dp(a, 110);
+        // 剧名至少占屏宽 1/8，用来排掉「第1集」「展开」这类小字
+        int minW = Math.max(dp(a, 60), size[0] / 8);
+        View[] best = new View[1];
+        int[] bestTop = new int[]{Integer.MIN_VALUE};
+        View root = tag.getRootView();
+        if (root != null) {
+            scanTitleAbove(root, tl[1], maxDy, minW, best, bestTop);
+        }
+        return best[0];
+    }
+
+    /** 标签行上方那一堆文字里，哪些**不是**剧名。 */
+    private static final String[] TITLE_NOISE = {
+            "@", "热评", "展开", "全屏观看", "作者声明", "网微剧备字", "内容纯属虚构",
+            "下拉刷新", "更新", "追更", "第1集 |",
+    };
+
+    /**
+     * 排除「标签行上方但不是标题」的常见节点。
+     *
+     * <p>实测 7.4.2.32 首页信息流里，标签行正上方可能是**作者名**
+     * （{@code @白天天}，漫剧类卡片没有独立剧名行）—— 不排除它，
+     * 用户拉「标题透明度」时先变淡的是作者名，反而更像 bug。
+     */
+    private static boolean isNoiseTitle(String s) {
+        for (int i = 0; i < TITLE_NOISE.length; i++) {
+            if (s.startsWith(TITLE_NOISE[i]) || s.contains(TITLE_NOISE[i])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void scanTitleAbove(View v, int tagTop, int maxDy, int minW,
+                                       View[] best, int[] bestTop) {
+        if (v instanceof TextView) {
+            boolean ours = Boolean.TRUE.equals(v.getTag(TAG_WEHID));
+            if ((v.getVisibility() == View.VISIBLE || ours)
+                    && v.getWidth() >= minW && v.getHeight() > 0
+                    && (ours || v.isShown())) {
+                CharSequence t = ((TextView) v).getText();
+                if (t != null && t.toString().trim().length() >= 2
+                        && !isNoiseTitle(t.toString().trim())) {
+                    int[] l = new int[2];
+                    try {
+                        v.getLocationOnScreen(l);
+                    } catch (Throwable ignored) {
+                        l = null;
+                    }
+                    if (l != null) {
+                        int dy = tagTop - l[1];
+                        // 只认标签行上方、且「最靠下」的那个 —— 标题紧贴标签行
+                        if (dy > 0 && dy <= maxDy && l[1] > bestTop[0]) {
+                            bestTop[0] = l[1];
+                            best[0] = v;
+                        }
+                    }
+                }
+            }
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                scanTitleAbove(g.getChildAt(i), tagTop, maxDy, minW, best, bestTop);
             }
         }
     }
@@ -1712,12 +2002,71 @@ public final class UiController {
     }
 
     /**
+     * 暂停分支专用的「只藏不还原」通道：把自定义清单应用到当前树。
+     *
+     * <p>不能走 {@link #applyDesired}：它会把不在 desired 里的旧视图按快照还原，
+     * 而暂停分支刚刚才把槽位还原过，一跑就等于把「暂停显示控制栏」抵消掉。
+     * 所以这里只处理 {@code d[0]==1} 的条目。
+     */
+    private static void applyListHideOnly(ViewGroup root, Activity a, int[] size) {
+        List<Task> tasks = new ArrayList<>();
+        for (String[] it : Config.overlayList(a)) {
+            if (it == null || it.length < 2 || !"1".equals(it[1])) {
+                continue;
+            }
+            TaskGroup g = new TaskGroup("[list]" + it[0], "[list]" + it[0]);
+            addTask(tasks, g, it[0], true, 100, true);
+        }
+        if (tasks.isEmpty()) {
+            return;
+        }
+        IdentityHashMap<View, int[]> desired = new IdentityHashMap<>();
+        runMatch(root, tasks, size, desired, null, a);
+        for (java.util.Map.Entry<View, int[]> e : desired.entrySet()) {
+            int[] d = e.getValue();
+            if (d[0] != 1) {
+                continue;
+            }
+            View v = e.getKey();
+            if (!(v.getTag(TAG_ORIG) instanceof float[])) {
+                v.setTag(TAG_ORIG, new float[]{v.getVisibility(), v.getAlpha()});
+            }
+            v.setVisibility(View.GONE);
+            v.setTag(TAG_WEHID, Boolean.TRUE);
+            v.setTag(TAG_LIST, Boolean.TRUE);
+        }
+        // 暂停期间删掉的规则也要放出来，否则用户会以为「清空没生效」
+        restoreListNotIn(root, desired);
+    }
+
+    private static void restoreListNotIn(View v, IdentityHashMap<View, int[]> desired) {
+        if (Boolean.TRUE.equals(v.getTag(TAG_LIST)) && !desired.containsKey(v)) {
+            Object o = v.getTag(TAG_ORIG);
+            if (o instanceof float[]) {
+                v.setVisibility((int) ((float[]) o)[0]);
+            }
+            v.setTag(TAG_WEHID, Boolean.FALSE);
+            v.setTag(TAG_LIST, null);
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                restoreListNotIn(g.getChildAt(i), desired);
+            }
+        }
+    }
+
+    /**
      * 暂停期间把「被模块隐藏」的组件临时显示出来（显隐槽位 / 自定义清单里勾了隐藏的，
      * 视图上带 {@code TAG_WEHID}=TRUE 归属标记）。宿主自己藏的视图不碰 ——
      * 避免与清屏 / 宿主控制栏自动隐藏打架；恢复播放后由正常应用分支重新按规则隐藏。
      * 清屏（清屏省心）模式下调用方会跳过本方法。
      */
     private static void showHiddenForPause(View v) {
+        // 自定义清单是用户明确要藏的：暂停也不显示（槽位仍然照旧还原）
+        if (Boolean.TRUE.equals(v.getTag(TAG_LIST))) {
+            return;
+        }
         if (Boolean.TRUE.equals(v.getTag(TAG_WEHID)) && v.getVisibility() != View.VISIBLE) {
             v.setVisibility(View.VISIBLE);
         }
@@ -1767,6 +2116,7 @@ public final class UiController {
     private static final int M_TEXT = 2;     // TextView 文案包含
     private static final int M_BAR = 3;      // 文案 → 满宽可点击祖先
     private static final int M_ID = 4;       // 资源 id 名
+    private static final int M_PKG = 5;      // 类名包含（包名片段，抗末段混淆改名）
 
     /** 一个槽位（或一条自定义清单项）的统计，用于 MISS 日志。 */
     private static final class TaskGroup {
@@ -1832,6 +2182,14 @@ public final class UiController {
             }
             return new Task(M_PCLS, new String[]{s}, g, hide, eff, gone);
         }
+        if (rule.startsWith("pkg:")) {
+            String s = rule.substring(4).trim();
+            if (s.length() < 4) {
+                logFile("bad pkg rule: " + s);
+                return null;
+            }
+            return new Task(M_PKG, new String[]{s}, g, hide, eff, gone);
+        }
         if (rule.startsWith("text:")) {
             return new Task(M_TEXT, splitKeys(rule.substring(5)), g, hide, eff, gone);
         }
@@ -1895,7 +2253,7 @@ public final class UiController {
         }
         boolean needClass = false, needText = false, needId = false;
         for (Task t : tasks) {
-            if (t.kind == M_CLS || t.kind == M_PCLS) {
+            if (t.kind == M_CLS || t.kind == M_PCLS || t.kind == M_PKG) {
                 needClass = true;
             } else if (t.kind == M_ID) {
                 needId = true;
@@ -1950,6 +2308,10 @@ public final class UiController {
                 if (cn != null && endsWithAny(cn, t.keys)) {
                     ViewParent p = v.getParent();
                     target = (p instanceof View) ? (View) p : v;
+                }
+            } else if (t.kind == M_PKG) {
+                if (cn != null && containsAny(cn, t.keys)) {
+                    target = v;
                 }
             } else if (t.kind == M_TEXT) {
                 if (text != null && containsAny(text, t.keys)) {
@@ -2248,6 +2610,44 @@ public final class UiController {
         }
     }
 
+    /**
+     * 悬浮球点选专用：为「用户点中的那一个 View」生成规则。
+     *
+     * <p>必须全树计数，不能用扫描器的 blocks 列表 —— 点中的往往是叶子
+     * （比如顶栏「关注」那个 TextView），它根本不在 blocks 里，
+     * 计数为 0 就会误判「id 唯一」，于是 {@code id:cx} 一次藏掉四个标签。
+     */
+    public static String ruleForPicked(Activity a, View picked) {
+        if (a == null || picked == null || a.getWindow() == null) {
+            return null;
+        }
+        View decor = a.getWindow().getDecorView();
+        if (!(decor instanceof ViewGroup)) {
+            return null;
+        }
+        List<String> classNames = new ArrayList<>();
+        List<String> ids = new ArrayList<>();
+        countTree((ViewGroup) decor, classNames, ids);
+        return ruleOf(a, picked, classNames, ids);
+    }
+
+    private static void countTree(ViewGroup g, List<String> classNames, List<String> ids) {
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View c = g.getChildAt(i);
+            if (c == null) {
+                continue;
+            }
+            classNames.add(c.getClass().getName());
+            String idn = idNameOf(c);
+            if (idn != null && !idn.isEmpty()) {
+                ids.add(idn);
+            }
+            if (c instanceof ViewGroup) {
+                countTree((ViewGroup) c, classNames, ids);
+            }
+        }
+    }
+
     private static boolean isFrameworkClass(String cn) {
         return cn.startsWith("android.") || cn.startsWith("androidx.")
                 || cn.startsWith("com.facebook.") || cn.startsWith("com.airbnb.");
@@ -2305,7 +2705,16 @@ public final class UiController {
         }
         boolean framework = isFrameworkClass(cn);
         boolean obfuscated = simple.length() <= 2 || cn.indexOf('.') < 0;
-        if (!framework && !obfuscated && same <= 1) {
+        /*
+         * 宿主自己的混淆短类名（rightview.b / like.ui.c 这种）也要能出 cls 规则。
+         *
+         * 以前一律按「混淆」拒掉，于是右侧互动栏只能退化成「@文案」——
+         * 而那一栏的文案是**计数**（10.8万），换一条视频数字就变，规则当场失效：
+         * 用户看到的就是「藏了，退出去再回来又冒出来」。
+         * 规则里写的是完整 FQN，匹配是 endsWith，只要全树唯一就够精确。
+         */
+        boolean hostClass = cn.startsWith("com.dragon.read.");
+        if (!framework && same <= 1 && (!obfuscated || hostClass)) {
             return "cls:" + cn;
         }
         String idName = idNameOf(v);
@@ -2322,13 +2731,36 @@ public final class UiController {
             }
         }
         String txt = firstText(v, 12);
-        if (txt != null && !txt.isEmpty()) {
+        if (txt != null && !txt.isEmpty() && !looksLikeCount(txt)) {
             return "@" + txt;
         }
-        if (!framework && !obfuscated) {
+        if (!framework) {
             return "cls:" + cn;
         }
         return null;
+    }
+
+    /**
+     * 「10.8万 / 1512 / 1.2亿 / 3w」这类是**计数**，随内容变化，不能当定位规则。
+     *
+     * <p>踩过的坑：右侧互动栏按钮没有 id、类名又是 1 字混淆，规则只能落到文案上，
+     * 于是生成了 {@code @10.8万} —— 换一条视频数字一变，规则就再也匹配不到，
+     * 表现得就像「隐藏失效了」。
+     */
+    private static boolean looksLikeCount(String s) {
+        if (s == null || s.isEmpty()) {
+            return true;
+        }
+        int digits = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isDigit(c)) {
+                digits++;
+            } else if ("万 亿 . , + w W k K".indexOf(c) < 0) {
+                return false;
+            }
+        }
+        return digits > 0;
     }
 
     private static String firstText(View v, int max) {
@@ -2392,6 +2824,14 @@ public final class UiController {
         if (idleAct == MotionEvent.ACTION_DOWN || idleAct == MotionEvent.ACTION_MOVE) {
             LAST_TOUCH.put(a, SystemClock.uptimeMillis());
             restoreIdleHidden(a);
+            // 同步解锁：用户碰了屏幕就说明他要控制权，清屏锁不能跨过这次触摸，
+            // 否则下一轮 cs 仍为 false 时会把已恢复的组件又藏回去。
+            IDLE_CS_LOCK.remove(a);
+        }
+        // 悬浮球点选中：手势全归遮罩，这里既不吞事件也不参与连击/长按判定
+        // （穿透模式下遮罩不吃触摸，模块手势照常，用 isCapturing 而不是 isOpen）
+        if (PickerOverlay.isCapturing()) {
+            return false;
         }
         if (Boolean.TRUE.equals(CONSUME.get(a))) {
             if (Boolean.TRUE.equals(SWALLOW.get(a))) {
@@ -2579,6 +3019,9 @@ public final class UiController {
         gd = new GestureDetector(a, new GestureDetector.SimpleOnGestureListener() {
             @Override
             public void onLongPress(MotionEvent e) {
+                if (PickerOverlay.isCapturing()) {
+                    return;
+                }
                 if (!isHomeTab(a, e.getRawX(), e.getRawY())
                         && !isTopCenter(a, e.getRawX(), e.getRawY())) {
                     return;
@@ -2617,9 +3060,23 @@ public final class UiController {
             if (!(bar instanceof ViewGroup)) {
                 return false;
             }
+            /*
+             * 三级定位，越往后越宽松：
+             *
+             *   1. 按宿主容器类名（BottomTabBarLayout 的第一个格子）—— 最快也最准，
+             *      但类名是宿主内部实现，换机型/换版本就可能对不上（实测某些机型
+             *      底部栏被换成了别的容器，或者格子被 ViewStub 包了一层）。
+             *   2. 按文案「首页」找那一格，再向上取可点击祖先 —— 文案不随版本变。
+             *   3. 底部左侧 1/5 区域 + 确认这确实是首页的 tab 栏（同屏还有「剧场」
+             *      「我的」）。这是「宁可多放开」的最后一道 —— 面板是唯一配置入口，
+             *      入口失效比偶尔误触严重得多。
+             */
             View item = findHomeTabItem((ViewGroup) bar);
             if (item == null || item.getWidth() <= 0) {
-                return false;
+                item = findTabByLabel(bar, "首页");
+            }
+            if (item == null || item.getWidth() <= 0) {
+                return isBottomLeftCorner(a, bar, x, y);
             }
             int[] loc = new int[2];
             item.getLocationOnScreen(loc);
@@ -2629,6 +3086,64 @@ public final class UiController {
                     && y >= loc[1] - pad && y <= loc[1] + item.getHeight() + pad;
         } catch (Throwable t) {
             return false;
+        }
+    }
+
+    /** 按文案找底部 tab 的那一格：文案自身不可点，向上取第一个可点击且有尺寸的祖先。 */
+    private static View findTabByLabel(View root, String label) {
+        List<View> hits = new ArrayList<>();
+        collectTextEquals(root, label, hits);
+        for (int i = 0; i < hits.size(); i++) {
+            View cur = hits.get(i);
+            for (int up = 0; up < 6 && cur != null; up++) {
+                if (cur.isClickable() && cur.getWidth() > 0) {
+                    return cur;
+                }
+                ViewParent p = cur.getParent();
+                cur = (p instanceof View) ? (View) p : null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 最后的坐标兜底：底部左侧 1/5。
+     *
+     * <p>必须先确认这一屏真的有首页底部栏（同一棵树里还有「剧场 / 我的」这类
+     * 兄弟 tab 文案），否则二级播放页底部左侧也是这块区域 —— 在那儿长按
+     * 是拖进度条，弹面板属于明显误触。
+     */
+    private static boolean isBottomLeftCorner(Activity a, View bar, float x, float y) {
+        try {
+            int h = a.getResources().getDisplayMetrics().heightPixels;
+            int w = a.getResources().getDisplayMetrics().widthPixels;
+            if (h <= 0 || w <= 0 || y < h * 0.90f || x > w * 0.22f) {
+                return false;
+            }
+            List<View> probe = new ArrayList<>();
+            collectTextEquals(bar, "剧场", probe);
+            if (probe.isEmpty()) {
+                collectTextEquals(bar, "我的", probe);
+            }
+            return !probe.isEmpty();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 收集文案严格等于 text 的 TextView。 */
+    private static void collectTextEquals(View v, String text, List<View> out) {
+        if (v instanceof TextView) {
+            CharSequence t = ((TextView) v).getText();
+            if (t != null && text.contentEquals(t.toString().trim())) {
+                out.add(v);
+            }
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                collectTextEquals(g.getChildAt(i), text, out);
+            }
         }
     }
 
